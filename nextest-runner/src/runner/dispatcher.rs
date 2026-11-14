@@ -1218,6 +1218,16 @@ where
     pub(super) fn run_finished(&mut self) -> RunOutcome {
         let stopwatch_end = self.stopwatch.snapshot();
         self.sync_keel_run_count();
+        if self.keel.as_ref().is_some_and(|gate| !gate.is_sealed()) {
+            // The run ended before Cargo said that every test binary was built,
+            // so there may be tests that were never seen. Counting one more
+            // keeps a run that was cancelled while it waited for the build from
+            // looking complete.
+            self.run_stats.initial_run_count = self
+                .run_stats
+                .initial_run_count
+                .max(self.run_stats.finished_count + 1);
+        }
 
         let final_stats = self.run_stats.summarize_final();
         let outcome = self.stress_cx.final_outcome(final_stats);

@@ -327,6 +327,7 @@ struct GateState {
     history: Arc<KeelHistory>,
     binaries_keyed: usize,
     key_time: Duration,
+    streamed: bool,
     timings: GateTimings,
 }
 
@@ -386,6 +387,10 @@ pub(crate) struct GateFinal {
     pub(crate) terminal_order: Vec<usize>,
     pub(crate) binaries_keyed: usize,
     pub(crate) key_time: Duration,
+
+    /// Whether the nodes arrived binary by binary, so that `key_time` adds up
+    /// the time of binaries that were keyed at once.
+    pub(crate) streamed: bool,
     pub(crate) timings: GateTimings,
 
     /// The nodes that never became ready, if the gate stalled.
@@ -418,6 +423,7 @@ impl KeelGate {
                 history,
                 binaries_keyed: 0,
                 key_time: Duration::ZERO,
+                streamed: false,
                 timings: GateTimings::default(),
             }),
         })
@@ -475,6 +481,11 @@ impl KeelGate {
         self.lock().nodes.len()
     }
 
+    /// Returns true once every test the run will have is known.
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.lock().sealed
+    }
+
     /// Returns the time since the run started.
     pub fn elapsed(&self) -> Duration {
         self.options.started.elapsed()
@@ -509,6 +520,7 @@ impl KeelGate {
         let nodes = std::mem::take(&mut binary.nodes);
         let keyed = !nodes.is_empty();
         let mut state = self.lock();
+        state.streamed = true;
         let base = state.add_nodes(nodes);
         state.key_time += binary.key_time;
         if keyed {
@@ -686,6 +698,7 @@ impl KeelGate {
             terminal_order: std::mem::take(&mut state.terminal_order),
             binaries_keyed: state.binaries_keyed,
             key_time: state.key_time,
+            streamed: state.streamed,
             timings: state.timings,
             stalled,
         }

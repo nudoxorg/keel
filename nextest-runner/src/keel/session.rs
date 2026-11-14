@@ -531,10 +531,15 @@ fn render_summary(
     );
     let _ = writeln!(
         out,
-        "build     {}\nkeys      executable keys for {} binaries   {}\nselect    {} to run, {} cached\nrun       {} passed, {} failed, {} blocked, {} flaky   {}",
+        "build     {}\nkeys      executable keys for {} binaries   {}{}\nselect    {} to run, {} cached\nrun       {} passed, {} failed, {} blocked, {} flaky   {}",
         format_ms(stages.build_ms),
         fin.binaries_keyed,
         format_ms(stages.key_ms),
+        if fin.streamed {
+            " (summed over threads)"
+        } else {
+            ""
+        },
         fin.tests.len() - cached,
         cached,
         counts.pass,
