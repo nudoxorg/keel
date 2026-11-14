@@ -358,6 +358,16 @@ pub enum TestEventKind<'a> {
         current_stats: RunStats,
     },
 
+    /// A test that failed is a root of the run, and the failure is final (Keel
+    /// only).
+    ///
+    /// This is sent as soon as the root is known, after the event for the test
+    /// itself, so that a red run says why while the rest of the run goes on.
+    KeelRoot {
+        /// The text of the root block.
+        text: String,
+    },
+
     /// An information request was received.
     InfoStarted {
         /// The number of tasks currently running. This is the same as the

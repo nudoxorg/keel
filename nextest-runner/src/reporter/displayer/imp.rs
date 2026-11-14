@@ -1096,6 +1096,11 @@ impl<'a> DisplayReporterImpl<'a> {
                     self.write_cached_line(*stress_index, *test_instance, cached_from, writer)?;
                 }
             }
+            TestEventKind::KeelRoot { text } => {
+                // The text of a root is the verdict of the run: it is shown at
+                // every status level.
+                write!(writer, "{text}")?;
+            }
             TestEventKind::RunBeginCancel {
                 setup_scripts_running,
                 current_stats,

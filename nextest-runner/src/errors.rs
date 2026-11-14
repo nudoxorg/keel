@@ -3670,6 +3670,30 @@ pub enum KeelError {
         message: String,
     },
 
+    /// The Keel history could not be written.
+    #[error("write the Keel history to `{path}`")]
+    HistoryWrite {
+        /// The history path.
+        path: Utf8PathBuf,
+
+        /// The underlying error.
+        #[source]
+        error: std::io::Error,
+    },
+
+    /// The scheduler ran out of tests it could run before every test finished.
+    #[error(
+        "run {count} tests that wait for each other, such as `{first}`; a cycle that the planner \
+         did not find is not expected, so report this"
+    )]
+    Stalled {
+        /// How many tests never became ready.
+        count: usize,
+
+        /// The first of them.
+        first: String,
+    },
+
     /// The Keel report could not be written.
     #[error("write the Keel report to `{path}`")]
     ReportWrite {

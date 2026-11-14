@@ -6,12 +6,15 @@
 
 use super::{
     config::{InputDecl, KeelConfig},
+    feed::FedBinary,
+    gate::GateNode,
     keyer::{BinaryCodeKeys, CodeKeyer},
+    scope::ExpectedBinary,
 };
 use crate::{
     config::core::EvaluatableProfile,
     errors::{CodeKeyError, KeelError},
-    list::{RustTestSuite, TestInstance, TestList},
+    list::{RustTestSuite, TestInstance, TestInstanceWithSettings, TestList},
     platform::BuildPlatforms,
     rustc_cli::RustcCli,
     target_runner::TargetRunner,
@@ -22,16 +25,20 @@ use guppy::{
     graph::{DependencyDirection, PackageGraph, PackageMetadata},
 };
 use keel::{
-    Digest, EnvContract, FileSpec, FilesInput, GroupId, Inputs, Kind, LocalStore, NetMode, Node,
-    NodeId, PartId, PartKind, Plan, Platform, Policy, ReachInfo, ResultStore, StoredPass, SymbolId,
-    Upstream,
+    Digest, EnvContract, FileSpec, FilesInput, GroupId, GroupKind, Inputs, Kind, LocalStore,
+    NetMode, Node, NodeId, PartId, PartKind, Plan, Platform, Policy, ResultStore, StoredPass,
+    SymbolId, Upstream,
 };
 use keel_decl::{Declaration, applies_to, try_nextest_test_name};
 use nextest_filtering::EvalContext;
-use nextest_metadata::RustTestBinaryKind;
+use nextest_metadata::{RustBinaryId, RustTestBinaryKind, TestCaseName};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tracing::{debug, warn};
@@ -41,6 +48,12 @@ use tracing::{debug, warn};
 pub(crate) struct PlannedTest {
     pub(crate) node: Node,
     pub(crate) cached: Option<StoredPass>,
+
+    /// Every symbol the test can reach, if known.
+    pub(crate) reach: Option<BTreeSet<SymbolId>>,
+
+    /// The symbols of the test's own package that it exercises, if known.
+    pub(crate) exercised: Option<BTreeSet<SymbolId>>,
 }
 
 /// Everything needed to build a [`KeelPlan`].
@@ -69,10 +82,8 @@ pub struct KeelPlanInputs<'a, 'g> {
 #[derive(Debug)]
 pub struct KeelPlan {
     pub(crate) tests: Vec<PlannedTest>,
-    pub(crate) index: HashMap<NodeId, usize>,
     pub(crate) plan: Plan,
     pub(crate) platform: Platform,
-    pub(crate) reach: Option<ReachInfo>,
     pub(crate) key_duration: Duration,
     pub(crate) binaries_keyed: usize,
 }
@@ -87,49 +98,38 @@ impl KeelPlan {
     ) -> Result<Self, KeelError> {
         let start = Instant::now();
         let platform = platform_facts(inputs.build_platforms, inputs.target_runner)?;
-        let ecx = inputs.profile.filterset_ecx();
-        let mut builder = PlanBuilder::new(inputs, config, &ecx);
+        let mut builder = PlanBuilder::new(
+            inputs.graph,
+            inputs.workspace_root,
+            config,
+            inputs.profile.filterset_ecx(),
+            cargo_env_of(inputs.test_list),
+        );
 
-        let mut nodes = Vec::new();
-        let mut reach = ReachBuilder::default();
+        let mut planned: Vec<(Node, Option<BTreeSet<u32>>, Option<BTreeSet<u32>>)> = Vec::new();
         let mut binaries_keyed = 0;
         for suite in inputs.test_list.iter() {
-            let selected: Vec<TestInstance<'_>> = suite
-                .status
-                .test_cases()
-                .map(|case| TestInstance::new(case, suite))
-                .filter(|instance| instance.test_info.filter_match.is_match())
-                .collect();
+            let selected = selected_tests(suite);
             if selected.is_empty() {
                 continue;
             }
             binaries_keyed += 1;
-            builder.plan_suite(suite, &selected, keyer, &platform, &mut nodes, &mut reach)?;
+            let keys = SuiteKeys::compute(suite, &selected, keyer)?;
+            planned.extend(builder.plan_suite(suite, &selected, &keys, &platform)?);
         }
 
+        let nodes: Vec<Node> = planned.iter().map(|(node, _, _)| node.clone()).collect();
         let plan = Plan::new(&nodes).map_err(KeelError::Plan)?;
-        let index: HashMap<NodeId, usize> = nodes
-            .iter()
-            .enumerate()
-            .map(|(i, node)| (node.id.clone(), i))
-            .collect();
 
-        let mut tests = Vec::with_capacity(nodes.len());
-        for node in nodes {
-            let cached = if node.policy.network {
-                None
-            } else {
-                lookup_pass(store, &node)
-            };
-            tests.push(PlannedTest { node, cached });
-        }
+        let tests = planned
+            .into_iter()
+            .map(|(node, reach, exercised)| planned_test(node, reach, exercised, store))
+            .collect();
 
         Ok(Self {
             tests,
-            index,
             plan,
             platform,
-            reach: reach.finish(),
             key_duration: start.elapsed(),
             binaries_keyed,
         })
@@ -196,6 +196,45 @@ impl KeelPlan {
     }
 }
 
+fn cargo_env_of(test_list: &TestList<'_>) -> BTreeMap<String, String> {
+    test_list
+        .cargo_env()
+        .name_values()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
+fn selected_tests<'s>(suite: &'s RustTestSuite<'_>) -> Vec<TestInstance<'s>> {
+    suite
+        .status
+        .test_cases()
+        .map(|case| TestInstance::new(case, suite))
+        .filter(|instance| instance.test_info.filter_match.is_match())
+        .collect()
+}
+
+fn planned_test(
+    node: Node,
+    reach: Option<BTreeSet<u32>>,
+    exercised: Option<BTreeSet<u32>>,
+    store: &LocalStore,
+) -> PlannedTest {
+    let symbols = |set: BTreeSet<u32>| -> BTreeSet<SymbolId> {
+        set.into_iter().map(|s| SymbolId(u64::from(s))).collect()
+    };
+    let cached = if node.policy.network {
+        None
+    } else {
+        lookup_pass(store, &node)
+    };
+    PlannedTest {
+        node,
+        cached,
+        reach: reach.map(symbols),
+        exercised: exercised.map(symbols),
+    }
+}
+
 fn lookup_pass(store: &LocalStore, node: &Node) -> Option<StoredPass> {
     match store.get_pass(&node.key) {
         Ok(Some(pass)) if pass.id == node.id => Some(pass),
@@ -210,88 +249,24 @@ fn lookup_pass(store: &LocalStore, node: &Node) -> Option<StoredPass> {
     }
 }
 
-#[derive(Default)]
-struct ReachBuilder {
-    info: ReachInfo,
-    any: bool,
+/// What it takes to key the tests of one binary, apart from the binary's
+/// package: the code keys, the digest of the binaries the tests can run, and the
+/// declarations in the binary.
+///
+/// Computing this reads the binary and does not touch any planner state, so it
+/// can run on several binaries at once.
+pub(crate) struct SuiteKeys {
+    code_keys: BinaryCodeKeys,
+    bin_digest: Digest,
+    declarations: Vec<Declaration>,
 }
 
-impl ReachBuilder {
-    fn record(
-        &mut self,
-        id: &NodeId,
-        reach: Option<&BTreeSet<u32>>,
-        exercised: Option<&BTreeSet<u32>>,
-    ) {
-        let symbols = |set: &BTreeSet<u32>| set.iter().map(|&s| SymbolId(u64::from(s))).collect();
-        if let Some(reach) = reach {
-            self.info.reach.insert(id.clone(), symbols(reach));
-            self.any = true;
-        }
-        if let Some(exercised) = exercised {
-            self.info.exercised.insert(id.clone(), symbols(exercised));
-            self.any = true;
-        }
-    }
-
-    fn finish(self) -> Option<ReachInfo> {
-        self.any.then_some(self.info)
-    }
-}
-
-struct PlanBuilder<'a, 'g, 'e> {
-    inputs: &'a KeelPlanInputs<'a, 'g>,
-    config: &'a KeelConfig,
-    ecx: &'e EvalContext<'e>,
-    ambient: HashMap<String, String>,
-    cargo_env: BTreeMap<String, String>,
-    crate_names: HashMap<String, String>,
-    dependency_groups: HashMap<PackageId, Vec<GroupId>>,
-    files_keys: HashMap<(String, Vec<String>), Digest>,
-    env_keys: HashMap<Vec<String>, Digest>,
-    tool_digests: HashMap<String, Digest>,
-}
-
-impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
-    fn new(
-        inputs: &'a KeelPlanInputs<'a, 'g>,
-        config: &'a KeelConfig,
-        ecx: &'e EvalContext<'e>,
-    ) -> Self {
-        let crate_names = inputs
-            .graph
-            .workspace()
-            .iter()
-            .map(|package| (package.name().replace('-', "_"), package.name().to_owned()))
-            .collect();
-        Self {
-            inputs,
-            config,
-            ecx,
-            ambient: std::env::vars().collect(),
-            cargo_env: inputs
-                .test_list
-                .cargo_env()
-                .name_values()
-                .map(|(name, value)| (name.to_owned(), value.to_owned()))
-                .collect(),
-            crate_names,
-            dependency_groups: HashMap::new(),
-            files_keys: HashMap::new(),
-            env_keys: HashMap::new(),
-            tool_digests: HashMap::new(),
-        }
-    }
-
-    fn plan_suite(
-        &mut self,
-        suite: &RustTestSuite<'g>,
+impl SuiteKeys {
+    pub(crate) fn compute(
+        suite: &RustTestSuite<'_>,
         selected: &[TestInstance<'_>],
         keyer: &dyn CodeKeyer,
-        platform: &Platform,
-        nodes: &mut Vec<Node>,
-        reach: &mut ReachBuilder,
-    ) -> Result<(), KeelError> {
+    ) -> Result<Self, KeelError> {
         let names: Vec<&str> = selected.iter().map(|t| t.name.as_str()).collect();
         let code_keys = keyer
             .keys(&suite.binary_path, &suite.binary_name, &names)
@@ -310,7 +285,69 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
                     error,
                 }
             })?;
-        let declared: Vec<(String, &Declaration)> = declarations
+        Ok(Self {
+            code_keys,
+            bin_digest,
+            declarations,
+        })
+    }
+}
+
+struct PlanBuilder<'a, 'g> {
+    graph: &'g PackageGraph,
+    workspace_root: &'a Utf8Path,
+    config: &'a KeelConfig,
+    ecx: EvalContext<'a>,
+    ambient: HashMap<String, String>,
+    cargo_env: BTreeMap<String, String>,
+    crate_names: HashMap<String, String>,
+    dependency_groups: HashMap<PackageId, Vec<GroupId>>,
+    package_levels: HashMap<String, u32>,
+    files_keys: HashMap<(String, Vec<String>), Digest>,
+    env_keys: HashMap<Vec<String>, Digest>,
+    tool_digests: HashMap<String, Digest>,
+}
+
+type PlannedNode = (Node, Option<BTreeSet<u32>>, Option<BTreeSet<u32>>);
+
+impl<'a, 'g> PlanBuilder<'a, 'g> {
+    fn new(
+        graph: &'g PackageGraph,
+        workspace_root: &'a Utf8Path,
+        config: &'a KeelConfig,
+        ecx: EvalContext<'a>,
+        cargo_env: BTreeMap<String, String>,
+    ) -> Self {
+        let crate_names = graph
+            .workspace()
+            .iter()
+            .map(|package| (package.name().replace('-', "_"), package.name().to_owned()))
+            .collect();
+        Self {
+            graph,
+            workspace_root,
+            config,
+            ecx,
+            ambient: std::env::vars().collect(),
+            cargo_env,
+            crate_names,
+            dependency_groups: HashMap::new(),
+            package_levels: HashMap::new(),
+            files_keys: HashMap::new(),
+            env_keys: HashMap::new(),
+            tool_digests: HashMap::new(),
+        }
+    }
+
+    fn plan_suite(
+        &mut self,
+        suite: &RustTestSuite<'_>,
+        selected: &[TestInstance<'_>],
+        keys: &SuiteKeys,
+        platform: &Platform,
+    ) -> Result<Vec<PlannedNode>, KeelError> {
+        let declared: Vec<(String, &Declaration)> = keys
+            .declarations
             .iter()
             .filter_map(|decl| {
                 try_nextest_test_name(decl, &suite.binary_name).map(|name| (name, decl))
@@ -319,6 +356,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
 
         let group = group_for(suite);
         let derived = self.derived_edges(suite);
+        let mut planned = Vec::with_capacity(selected.len());
         for instance in selected {
             let id = NodeId::new(format!(
                 "rust:{}::{}",
@@ -330,21 +368,19 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
                 .filter(|(name, _)| applies_to(name, instance.name.as_str()))
                 .map(|(_, decl)| *decl)
                 .collect();
-            let node = self.plan_test(
+            planned.push(self.plan_test(
                 suite,
                 instance,
                 id,
                 &group,
                 &derived,
                 &applicable,
-                &code_keys,
-                &bin_digest,
+                &keys.code_keys,
+                &keys.bin_digest,
                 platform,
-                reach,
-            )?;
-            nodes.push(node);
+            )?);
         }
-        Ok(())
+        Ok(planned)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -359,8 +395,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
         code_keys: &BinaryCodeKeys,
         bin_digest: &Digest,
         platform: &Platform,
-        reach: &mut ReachBuilder,
-    ) -> Result<Node, KeelError> {
+    ) -> Result<PlannedNode, KeelError> {
         let test_name = instance.name.as_str();
         let query = instance.to_test_query();
         let package_name = suite.package.name();
@@ -372,7 +407,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
             .cloned()
             .unwrap_or_default();
         for entry in &self.config.overrides {
-            if entry.filter.matches_test(&query, self.ecx) {
+            if entry.filter.matches_test(&query, &self.ecx) {
                 decl.merge(&entry.decl);
             }
         }
@@ -380,7 +415,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
         let mut stands_on: Vec<Upstream> = derived.to_vec();
         let mut joins: BTreeSet<PartId> = BTreeSet::new();
         for entry in &self.config.hierarchy {
-            if !entry.filter.matches_test(&query, self.ecx) {
+            if !entry.filter.matches_test(&query, &self.ecx) {
                 continue;
             }
             if entry.stands_on_only {
@@ -409,9 +444,12 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
         stands_on.retain(|upstream| !matches!(upstream, Upstream::Node(n) if *n == id));
 
         let (test_key, kind) = code_keys.key_for(test_name);
+        let mut reach = None;
+        let mut exercised = None;
         if let Some(per_test) = code_keys.per_test.get(test_name) {
             joins.extend(per_test.crates.iter().map(|name| self.crate_part(name)));
-            reach.record(&id, per_test.reach.as_ref(), per_test.exercised.as_ref());
+            reach = per_test.reach.clone();
+            exercised = per_test.exercised.clone();
         }
         let code = fold_code(&test_key, bin_digest, &id);
 
@@ -434,7 +472,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
                 error,
             })?;
 
-        Ok(Node {
+        let node = Node {
             id,
             kind: Kind::RustTest,
             group: group.clone(),
@@ -449,7 +487,56 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
                 network: decl.network.unwrap_or(false),
                 ..Policy::default()
             },
-        })
+        };
+        Ok((node, reach, exercised))
+    }
+
+    /// Returns the level the node would have in the full hierarchy, going by
+    /// the package graph alone.
+    ///
+    /// The level of a node is one more than the highest level of what it
+    /// stands on. The level of a group of unit tests is the length of the
+    /// longest chain of workspace dependencies below its package, so it is
+    /// known before any of the group's binaries is built. A declared edge to a
+    /// single node counts as one level.
+    fn level_of(&mut self, node: &Node) -> u32 {
+        node.stands_on
+            .iter()
+            .map(|upstream| match upstream {
+                Upstream::Group(group) => self.group_level(group) + 1,
+                Upstream::Node(_) => 1,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn group_level(&mut self, group: &GroupId) -> u32 {
+        match group.kind() {
+            GroupKind::Unit => self.package_level(group.name()),
+            GroupKind::Integration => self.package_level(group.name()) + 1,
+            GroupKind::Scenario => 0,
+        }
+    }
+
+    fn package_level(&mut self, name: &str) -> u32 {
+        if let Some(&level) = self.package_levels.get(name) {
+            return level;
+        }
+        let Ok(package) = self.graph.workspace().member_by_name(name) else {
+            return 0;
+        };
+        let dependencies: Vec<String> = self
+            .dependency_groups_of(&package)
+            .iter()
+            .map(|group| group.name().to_owned())
+            .collect();
+        let level = dependencies
+            .iter()
+            .map(|dependency| self.package_level(dependency) + 1)
+            .max()
+            .unwrap_or(0);
+        self.package_levels.insert(name.to_owned(), level);
+        level
     }
 
     fn canonical_name(&self, name: &str) -> String {
@@ -480,7 +567,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
         }
     }
 
-    fn derived_edges(&mut self, suite: &RustTestSuite<'g>) -> Vec<Upstream> {
+    fn derived_edges(&mut self, suite: &RustTestSuite<'_>) -> Vec<Upstream> {
         let package = suite.package;
         let mut groups = self.dependency_groups_of(&package).to_vec();
         if is_integration(&suite.kind) {
@@ -489,10 +576,10 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
         groups.into_iter().map(Upstream::Group).collect()
     }
 
-    fn dependency_groups_of(&mut self, package: &PackageMetadata<'g>) -> &[GroupId] {
+    fn dependency_groups_of(&mut self, package: &PackageMetadata<'_>) -> &[GroupId] {
         self.dependency_groups
             .entry(package.id().clone())
-            .or_insert_with(|| workspace_dependency_groups(self.inputs.graph, package))
+            .or_insert_with(|| workspace_dependency_groups(self.graph, package))
     }
 
     fn files_digest(
@@ -500,7 +587,7 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
         suite: &RustTestSuite<'_>,
         decl: &InputDecl,
     ) -> Result<Digest, KeelError> {
-        let package_dir = package_relative_dir(self.inputs.graph, &suite.package);
+        let package_dir = package_relative_dir(self.graph, &suite.package);
         let globs = decl
             .inputs
             .iter()
@@ -524,10 +611,12 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
             globs,
             exclude: Vec::new(),
         };
-        let (digest, _paths) = keel::files_key(self.inputs.workspace_root.as_std_path(), &spec)
-            .map_err(|error| KeelError::Files {
-                package: suite.package.name().to_owned(),
-                error,
+        let (digest, _paths) =
+            keel::files_key(self.workspace_root.as_std_path(), &spec).map_err(|error| {
+                KeelError::Files {
+                    package: suite.package.name().to_owned(),
+                    error,
+                }
             })?;
         self.files_keys.insert(cache_key, digest);
         Ok(digest)
@@ -577,6 +666,185 @@ impl<'a, 'g, 'e> PlanBuilder<'a, 'g, 'e> {
             put(&mut buf, digest.to_string().as_bytes());
         }
         Ok(Some(Digest::of(&buf)))
+    }
+}
+
+/// Plans the tests of one test binary at a time, as Cargo reports the binaries.
+///
+/// It produces the same nodes, with the same keys, that [`KeelPlan::build`] does
+/// for the whole run. A binary is keyed without any other binary being known;
+/// what the binary's tests stand on is expressed as groups, which the gate
+/// resolves as the other binaries arrive.
+pub struct KeelStreamPlanner<'a, 'g> {
+    builder: Mutex<PlanBuilder<'a, 'g>>,
+    keyer: &'a dyn CodeKeyer,
+    store: &'a LocalStore,
+    platform: Platform,
+    expected: Mutex<HashMap<RustBinaryId, GroupId>>,
+    cargo_env_set: Mutex<bool>,
+    sequence: AtomicU64,
+}
+
+impl<'a, 'g> KeelStreamPlanner<'a, 'g> {
+    /// Creates a planner.
+    ///
+    /// `inputs.test_list` is used only for its mode; the environment tests run
+    /// with is taken from the first list that is planned.
+    pub fn new(
+        inputs: &KeelPlanInputs<'a, 'g>,
+        config: &'a KeelConfig,
+        store: &'a LocalStore,
+        keyer: &'a dyn CodeKeyer,
+        expected: Vec<ExpectedBinary>,
+    ) -> Result<Self, KeelError> {
+        let platform = platform_facts(inputs.build_platforms, inputs.target_runner)?;
+        let builder = PlanBuilder::new(
+            inputs.graph,
+            inputs.workspace_root,
+            config,
+            inputs.profile.filterset_ecx(),
+            BTreeMap::new(),
+        );
+        Ok(Self {
+            builder: Mutex::new(builder),
+            keyer,
+            store,
+            platform,
+            expected: Mutex::new(
+                expected
+                    .into_iter()
+                    .map(|binary| (binary.id, binary.group))
+                    .collect(),
+            ),
+            cargo_env_set: Mutex::new(false),
+            sequence: AtomicU64::new(0),
+        })
+    }
+
+    /// Returns the groups of the binaries that have not been planned yet, once
+    /// per binary.
+    pub fn expected_groups(&self) -> Vec<GroupId> {
+        self.expected
+            .lock()
+            .expect("keel planner lock is never poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the platform the keys are computed for.
+    pub fn platform(&self) -> &Platform {
+        &self.platform
+    }
+
+    /// Plans the tests of every binary in `list`.
+    ///
+    /// Several threads may plan lists at once: reading a binary to key it does
+    /// not wait for anything, and only the construction of nodes is serialized.
+    pub fn plan_list<'l>(
+        &self,
+        list: &'l TestList<'l>,
+        profile: &'l EvaluatableProfile<'l>,
+    ) -> Result<Vec<FedBinary<'l>>, KeelError>
+    where
+        'g: 'l,
+    {
+        let start = Instant::now();
+        {
+            let mut set = self
+                .cargo_env_set
+                .lock()
+                .expect("keel planner lock is never poisoned");
+            if !*set {
+                self.builder
+                    .lock()
+                    .expect("keel planner lock is never poisoned")
+                    .cargo_env = cargo_env_of(list);
+                *set = true;
+            }
+        }
+
+        let mut queue_by_binary: HashMap<RustBinaryId, Vec<TestInstanceWithSettings<'l>>> =
+            HashMap::new();
+        for test in list.to_priority_queue(profile) {
+            queue_by_binary
+                .entry(test.instance.suite_info.binary_id.clone())
+                .or_default()
+                .push(test);
+        }
+
+        let mut fed = Vec::new();
+        for suite in list.iter() {
+            let queue = queue_by_binary.remove(&suite.binary_id).unwrap_or_default();
+            let expected = self
+                .expected
+                .lock()
+                .expect("keel planner lock is never poisoned")
+                .remove(&suite.binary_id);
+            let selected = selected_tests(suite);
+            if selected.is_empty() {
+                fed.push(FedBinary::without_tests(expected, queue, start.elapsed()));
+                continue;
+            }
+
+            let keys = SuiteKeys::compute(suite, &selected, self.keyer)?;
+            let mut planned = {
+                let mut builder = self
+                    .builder
+                    .lock()
+                    .expect("keel planner lock is never poisoned");
+                let planned = builder.plan_suite(suite, &selected, &keys, &self.platform)?;
+                planned
+                    .into_iter()
+                    .map(|(node, reach, exercised)| {
+                        let level = builder.level_of(&node);
+                        (node, reach, exercised, level)
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let position_of: HashMap<&TestCaseName, usize> = selected
+                .iter()
+                .enumerate()
+                .map(|(position, instance)| (instance.name, position))
+                .collect();
+            let mut tests = Vec::with_capacity(selected.len());
+            let mut unplanned = Vec::new();
+            let mut orders = vec![0; selected.len()];
+            for test in queue {
+                match position_of.get(test.instance.name) {
+                    Some(&position) => {
+                        let rank = u64::try_from(100 - i16::from(test.settings.priority().to_i8()))
+                            .unwrap_or(0);
+                        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+                        orders[position] = (rank << 40) | sequence;
+                        tests.push((position, test));
+                    }
+                    None => unplanned.push(test),
+                }
+            }
+
+            let group = group_for(suite);
+            let nodes = planned
+                .drain(..)
+                .zip(orders)
+                .map(|((node, reach, exercised, level), order)| GateNode {
+                    planned: planned_test(node, reach, exercised, self.store),
+                    level,
+                    order,
+                })
+                .collect();
+            let _ = group;
+            fed.push(FedBinary {
+                expected,
+                nodes,
+                tests,
+                unplanned,
+                key_time: start.elapsed(),
+            });
+        }
+        debug!("planned {} binaries in {:?}", fed.len(), start.elapsed());
+        Ok(fed)
     }
 }
 

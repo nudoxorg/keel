@@ -557,6 +557,7 @@ pub(super) fn terminal_progress_value(event: &TestEvent<'_>) -> TermProgress {
         | TestEventKind::TestRetryStarted { .. }
         | TestEventKind::TestSkipped { .. }
         | TestEventKind::TestBlocked { .. }
+        | TestEventKind::KeelRoot { .. }
         | TestEventKind::TestCached { .. }
         | TestEventKind::InfoStarted { .. }
         | TestEventKind::InfoResponse { .. }

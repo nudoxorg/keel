@@ -14,7 +14,7 @@ use crate::{
         TestRunnerBuildError, TestRunnerExecuteErrors, TracerCommandParseError,
     },
     input::{InputHandler, InputHandlerKind, InputHandlerStatus},
-    keel::{KeelGate, ReadyStream, ReadyTest},
+    keel::{KeelFeed, KeelGate, ReadyStream, ReadyTest},
     list::{OwnedTestInstanceId, TestInstanceWithSettings, TestList},
     reporter::events::{ReporterEvent, RunOutcome, StressIndex},
     runner::ExecutorEvent,
@@ -410,6 +410,7 @@ impl TestRunnerBuilder {
                 interceptor: self.interceptor,
                 expected_outstanding: self.expected_outstanding,
                 keel: self.keel,
+                keel_feed: None,
                 version_env_vars,
                 runtime,
             },
@@ -470,6 +471,15 @@ pub struct TestRunner<'a> {
 }
 
 impl<'a> TestRunner<'a> {
+    /// Takes the tests of a Keel run from `feed` instead of from the test list.
+    ///
+    /// The runner must have a Keel gate (see [`TestRunnerBuilder::set_keel`]).
+    /// Tests then reach the runner while it runs, and the run ends when the feed
+    /// is closed and every test has been handled.
+    pub fn set_keel_feed(&mut self, feed: Arc<KeelFeed<'a>>) {
+        self.inner.keel_feed = Some(feed);
+    }
+
     /// Returns the unique ID for this test run.
     pub fn run_id(&self) -> ReportUuid {
         self.inner.run_id
@@ -588,6 +598,7 @@ struct TestRunnerInner<'a> {
     interceptor: Interceptor,
     expected_outstanding: Option<BTreeSet<OwnedTestInstanceId>>,
     keel: Option<Arc<KeelGate>>,
+    keel_feed: Option<Arc<KeelFeed<'a>>>,
     version_env_vars: VersionEnvVars,
     runtime: Runtime,
 }
@@ -739,9 +750,12 @@ impl<'a> TestRunnerInner<'a> {
             let filter_resp_tx = resp_tx.clone();
 
             let tests = self.test_list.to_priority_queue(self.profile);
-            let ready = match &self.keel {
-                Some(gate) => ReadyStream::new(gate.clone(), tests).left_stream(),
-                None => futures::stream::iter(tests)
+            let ready = match (&self.keel, &self.keel_feed) {
+                (Some(gate), Some(feed)) => {
+                    ReadyStream::from_feed(gate.clone(), feed.clone()).left_stream()
+                }
+                (Some(gate), None) => ReadyStream::new(gate.clone(), tests).left_stream(),
+                (None, _) => futures::stream::iter(tests)
                     .map(ReadyTest::Run)
                     .right_stream(),
             };

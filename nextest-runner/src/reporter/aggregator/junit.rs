@@ -284,7 +284,9 @@ impl<'cfg> MetadataJunit<'cfg> {
                 let message = format!("Cached: a pass was stored by run {cached_from}");
                 self.add_not_run_test_case(stress_index, test_instance, message);
             }
-            TestEventKind::RunBeginCancel { .. } | TestEventKind::RunBeginKill { .. } => {}
+            TestEventKind::KeelRoot { .. }
+            | TestEventKind::RunBeginCancel { .. }
+            | TestEventKind::RunBeginKill { .. } => {}
             TestEventKind::RunFinished {
                 run_id,
                 start_time,

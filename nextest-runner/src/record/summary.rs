@@ -547,7 +547,9 @@ impl TestEventKindSummary<LiveSpec> {
                 junit_report_skipped,
             }),
             // Keel events are not part of the recording format.
-            TestEventKind::TestBlocked { .. } | TestEventKind::TestCached { .. } => return None,
+            TestEventKind::TestBlocked { .. }
+            | TestEventKind::TestCached { .. }
+            | TestEventKind::KeelRoot { .. } => return None,
             TestEventKind::RunBeginCancel {
                 setup_scripts_running,
                 current_stats,

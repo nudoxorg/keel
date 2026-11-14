@@ -1166,7 +1166,7 @@ impl App {
                         target_runner,
                     })
                     .map_err(|err| ExpectedError::KeelError { err })?;
-                let session = setup.start(plan, build_duration);
+                let session = setup.start(plan, build_started, build_duration);
                 runner_builder.set_keel(session.gate());
                 Some(session)
             }

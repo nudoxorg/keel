@@ -692,6 +692,9 @@ where
                 // Use len() + 1 because new_test hasn't been called yet (it
                 // must happen after the successful send to avoid orphaned
                 // state on failure).
+                if let Some(gate) = &self.keel {
+                    gate.on_started();
+                }
                 self.basic_callback(TestEventKind::TestStarted {
                     stress_index,
                     test_instance: test_instance.id(),
@@ -808,17 +811,26 @@ where
             }) => {
                 let run_statuses = self.finish_test(test_instance.id(), last_run_status);
                 self.run_stats.on_test_finished(&run_statuses);
+                let mut keel_root = None;
+                let mut keel_verdict_is_final = false;
                 if let Some(gate) = &self.keel {
-                    gate.on_finished(
+                    keel_root = gate.on_finished(
                         &test_instance.suite_info.binary_id,
                         test_instance.name,
                         &run_statuses,
+                        self.run_stats.cancel_reason.is_some(),
                     );
+                    keel_verdict_is_final = keel_root.is_some() && gate.fail_fast_verdict();
                 }
 
                 // Check if this run should be cancelled because of a failure.
                 // is_exceeded returns Some(terminate_mode) if max-fail is exceeded.
-                let terminate_mode = self.max_fail.is_exceeded(self.run_stats.failed_count());
+                let mut terminate_mode = self.max_fail.is_exceeded(self.run_stats.failed_count());
+                if keel_verdict_is_final {
+                    // A root is final: the run is red, and the rest of it only
+                    // delays saying so.
+                    terminate_mode = Some(TerminateMode::Immediate);
+                }
 
                 self.basic_callback(TestEventKind::TestFinished {
                     stress_index,
@@ -832,6 +844,9 @@ where
                     current_stats: self.run_stats,
                     running: self.running(),
                 });
+                if let Some(root) = keel_root {
+                    self.basic_callback(TestEventKind::KeelRoot { text: root.text });
+                }
 
                 if let Some(terminate_mode) = terminate_mode {
                     // A test failed: start cancellation if required.

@@ -5,15 +5,21 @@
 
 use super::{
     config::{DEFAULT_KEEL_CONFIG_PATH, DEFAULT_KEEL_STORE_DIR, KeelConfig},
+    gate::{GateOptions, KeelGate},
+    history::{HISTORY_FILE_NAME, KeelHistory},
     keyer::{CodeKeyer, ExecutableKeyer},
-    plan::{KeelPlan, KeelPlanInputs},
+    plan::{KeelPlan, KeelPlanInputs, KeelStreamPlanner},
+    scope::ExpectedBinary,
     session::{KeelReportOptions, KeelSession},
 };
 use crate::errors::KeelError;
 use camino::{Utf8Path, Utf8PathBuf};
 use keel::LocalStore;
 use nextest_filtering::ParseContext;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// Settings from the command line.
 #[derive(Clone, Debug, Default)]
@@ -29,12 +35,16 @@ pub struct KeelSettings {
 
     /// `--keel-no-block`: run blocked tests anyway.
     pub no_block: bool,
+
+    /// `--keel-fail-fast-verdict`: cancel the run when the first root is final.
+    pub fail_fast_verdict: bool,
 }
 
 /// A loaded Keel configuration, ready to plan and run.
 pub struct KeelSetup {
     config: KeelConfig,
     store: LocalStore,
+    history: Arc<KeelHistory>,
     settings: KeelSettings,
     workspace_root: Utf8PathBuf,
     keyer: Arc<dyn CodeKeyer>,
@@ -71,10 +81,15 @@ impl KeelSetup {
             (None, None) => workspace_root.join(DEFAULT_KEEL_STORE_DIR),
         };
         let store = LocalStore::open(store_dir.as_std_path()).map_err(KeelError::Store)?;
+        let history = match store_dir.parent() {
+            Some(parent) => KeelHistory::load(&parent.join(HISTORY_FILE_NAME)),
+            None => KeelHistory::empty(),
+        };
 
         Ok(Self {
             config,
             store,
+            history: Arc::new(history),
             settings,
             workspace_root: workspace_root.to_owned(),
             keyer: Arc::new(ExecutableKeyer),
@@ -96,17 +111,54 @@ impl KeelSetup {
         self.settings.no_block
     }
 
+    /// Returns whether the run is cancelled when the first root is final.
+    pub fn fail_fast_verdict(&self) -> bool {
+        self.settings.fail_fast_verdict
+    }
+
     /// Keys every selected test and looks up stored passes.
     pub fn plan(&self, inputs: &KeelPlanInputs<'_, '_>) -> Result<KeelPlan, KeelError> {
         KeelPlan::build(inputs, &self.config, &self.store, self.keyer.as_ref())
     }
 
-    /// Starts a session for a plan.
-    pub fn start(&self, plan: KeelPlan, build_duration: Duration) -> KeelSession {
+    /// Creates the planner for a run that keys binaries as Cargo reports them.
+    ///
+    /// `expected` are the binaries Cargo may report; see
+    /// [`predict_test_binaries`](super::predict_test_binaries).
+    pub fn stream_planner<'a, 'g>(
+        &'a self,
+        inputs: &KeelPlanInputs<'a, 'g>,
+        expected: Vec<ExpectedBinary>,
+    ) -> Result<KeelStreamPlanner<'a, 'g>, KeelError> {
+        KeelStreamPlanner::new(
+            inputs,
+            &self.config,
+            &self.store,
+            self.keyer.as_ref(),
+            expected,
+        )
+    }
+
+    fn gate_options(&self, started: Instant) -> GateOptions {
+        GateOptions {
+            no_block: self.settings.no_block,
+            fail_fast_verdict: self.settings.fail_fast_verdict,
+            history: self.history.clone(),
+            started,
+        }
+    }
+
+    fn session(
+        &self,
+        gate: Arc<KeelGate>,
+        platform: keel::Platform,
+        started: Instant,
+    ) -> KeelSession {
         KeelSession::new(
-            plan,
-            self.settings.no_block,
+            gate,
             self.store.clone(),
+            self.history.clone(),
+            platform,
             KeelReportOptions {
                 report_path: self
                     .settings
@@ -114,10 +166,34 @@ impl KeelSetup {
                     .as_ref()
                     .map(|path| absolute(path)),
                 budget: self.config.budget(),
-                build_duration,
                 workspace_root: self.workspace_root.clone(),
+                started,
             },
         )
+    }
+
+    /// Starts a session for a plan built after the build finished.
+    ///
+    /// `started` is when the run started, before the build; `build_duration` is
+    /// how long the build took.
+    pub fn start(&self, plan: KeelPlan, started: Instant, build_duration: Duration) -> KeelSession {
+        let platform = plan.platform.clone();
+        let gate = KeelGate::from_plan(plan, self.gate_options(started));
+        gate.set_cargo_exit_at(build_duration);
+        self.session(gate, platform, started)
+    }
+
+    /// Starts a session whose tests arrive while the build is running.
+    ///
+    /// The groups of the binaries the planner expects are declared to the gate.
+    pub fn start_streaming(
+        &self,
+        planner: &KeelStreamPlanner<'_, '_>,
+        started: Instant,
+    ) -> KeelSession {
+        let gate = KeelGate::streaming(self.gate_options(started));
+        gate.expect_binaries(planner.expected_groups());
+        self.session(gate, planner.platform().clone(), started)
     }
 }
 

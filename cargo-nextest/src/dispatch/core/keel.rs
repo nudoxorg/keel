@@ -62,6 +62,16 @@ pub(crate) struct KeelOpts {
     #[arg(long, requires = "keel")]
     pub(crate) keel_no_block: bool,
 
+    /// End the run as soon as the first root failure is final.
+    ///
+    /// A root failure is a failed test that no failed test it stands on explains.
+    /// With this flag, when one is final (its last retry has finished), the run
+    /// is cancelled and exits with a failure, even if Cargo is still compiling;
+    /// Cargo is terminated too. Without it, the run continues and prints the
+    /// root as soon as it is known.
+    #[arg(long, requires = "keel")]
+    pub(crate) keel_fail_fast_verdict: bool,
+
     /// Link test binaries with this linker.
     ///
     /// Used to record what the linker sees for Keel's reach analysis. Sets
@@ -77,6 +87,7 @@ impl KeelOpts {
             store_dir: self.keel_store.clone(),
             report_path: self.keel_report.clone(),
             no_block: self.keel_no_block,
+            fail_fast_verdict: self.keel_fail_fast_verdict,
         }
     }
 }
