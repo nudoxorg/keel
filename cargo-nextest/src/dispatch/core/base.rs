@@ -577,6 +577,26 @@ pub(crate) struct BinaryStream {
     pub(crate) forward_json: bool,
 }
 
+impl BinaryStream {
+    /// Ends the build, and the compilers and build scripts it started.
+    ///
+    /// On Unix the build runs in a process group of its own, which is signalled
+    /// as a whole: terminating Cargo alone would leave its children running to
+    /// the end of whatever they are doing.
+    pub(crate) fn terminate(&self) {
+        #[cfg(unix)]
+        for pid in self.reader.pids() {
+            if let Ok(pid) = i32::try_from(pid) {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+        }
+        let _ = self.reader.kill();
+    }
+}
+
 // Helper for CargoBuildSettings.
 mod helpers {
     use super::BinaryStream;
@@ -654,8 +674,17 @@ mod helpers {
                 .into_iter()
                 .map(str::to_owned)
                 .collect();
-            let reader = cargo_cli
-                .to_expression()
+            let expression = cargo_cli.to_expression();
+            // Give the build a process group of its own, so that ending the build
+            // ends the whole tree. A terminal's interrupt reaches nextest, which
+            // ends the build in turn.
+            #[cfg(unix)]
+            let expression = expression.before_spawn(|command| {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+                Ok(())
+            });
+            let reader = expression
                 .stdout_capture()
                 .unchecked()
                 .reader()

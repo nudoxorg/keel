@@ -499,6 +499,7 @@ dependencies = [
  "nextest-metadata",
  "nextest-runner",
  "nextest-workspace-hack",
+ "nix 0.31.3",
  "owo-colors",
  "pathdiff",
  "quick-junit",

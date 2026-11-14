@@ -151,7 +151,7 @@ impl<'t, 'p> Producer<'t, 'p> {
             shared.cancelled.store(true, Ordering::SeqCst);
             self.gate.cancel();
             // Ending the build closes the pipe that the reader thread reads.
-            let _ = self.stream.reader.kill();
+            self.stream.terminate();
             let read = producer
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
@@ -172,7 +172,7 @@ impl<'t, 'p> Producer<'t, 'p> {
         drop(slot);
         // A run that cannot be completed is red. Stop spending time on it.
         self.gate.cancel();
-        let _ = self.stream.reader.kill();
+        self.stream.terminate();
     }
 
     fn failed(&self, shared: &Shared) -> bool {
