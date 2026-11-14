@@ -48,6 +48,7 @@ struct Run {
     report: Report,
     stderr: String,
     wall: Duration,
+    exit_code: Option<i32>,
 }
 
 impl Harness {
@@ -161,6 +162,7 @@ impl Harness {
             report,
             stderr,
             wall,
+            exit_code: output.status.code(),
         }
     }
 
@@ -215,16 +217,6 @@ fn statuses(report: &Report) -> BTreeMap<&NodeId, Status> {
     report.nodes.iter().map(|r| (&r.id, r.status)).collect()
 }
 
-fn crate_of(synth: &Value, id: &str) -> String {
-    synth["tests"]
-        .as_array()
-        .expect("tests")
-        .iter()
-        .find(|t| t["id"] == id)
-        .map(|t| t["crate"].as_str().expect("crate").to_owned())
-        .unwrap_or_else(|| panic!("{id} is not in synth.json"))
-}
-
 fn dependents_closure(synth: &Value, name: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::from([name.to_owned()]);
     for c in synth["crates"].as_array().expect("crates") {
@@ -251,6 +243,15 @@ fn keel_acceptance() {
     .expect("synth.json parses");
     let tests = synth["tests"].as_array().expect("tests").clone();
     let total = tests.len() as u64;
+    let crate_of: BTreeMap<NodeId, String> = tests
+        .iter()
+        .map(|t| {
+            (
+                node_id(t["id"].as_str().expect("id")),
+                t["crate"].as_str().expect("crate").to_owned(),
+            )
+        })
+        .collect();
     let all_ids: BTreeSet<NodeId> = tests
         .iter()
         .map(|t| node_id(t["id"].as_str().expect("id")))
@@ -265,6 +266,7 @@ fn keel_acceptance() {
         "{}",
         first.stderr
     );
+    assert_eq!(first.exit_code, Some(0), "{}", first.stderr);
     assert_eq!(first.report.counts.cached, 0);
     assert_eq!(first.report.counts.pass, total, "{}", first.stderr);
     assert_eq!(
@@ -281,6 +283,12 @@ fn keel_acceptance() {
     let second = h.run_keel("report-2.json");
     h.record("run 2 (no change)", &second);
     assert_eq!(second.report.counts.cached, total, "{}", second.stderr);
+    assert_eq!(second.exit_code, Some(0), "{}", second.stderr);
+    assert!(
+        second.stderr.contains("CACHED [ run "),
+        "cached tests are listed:\n{}",
+        second.stderr
+    );
     assert!(
         !second.stderr.contains(" PASS ["),
         "no test should have been spawned:\n{}",
@@ -321,12 +329,18 @@ fn keel_acceptance() {
         assert!(flips.contains(root), "root {root} is not an expected flip");
     }
     assert_eq!(run.report.verdict, keel::Verdict::Fail);
+    assert_ne!(run.exit_code, Some(0), "a run with roots must fail");
+    assert!(
+        run.stderr.contains("BLOCKED [ by rust:") && run.stderr.contains("ROOT  rust:"),
+        "blocked tests and roots are printed:\n{}",
+        run.stderr
+    );
     assert!(!run.report.roots.is_empty());
     let closure = dependents_closure(&synth, &mutated);
     let root_set: BTreeSet<&NodeId> = run.report.roots.iter().collect();
     let blocked_in_dependent = run.report.nodes.iter().any(|record| {
         record.status == Status::Blocked
-            && !crate_of(&synth, &record.id.as_str()[5..].replacen("::", " ", 1)).eq(&mutated)
+            && crate_of[&record.id] != mutated
             && record.blocked_by.iter().any(|by| {
                 root_set.contains(by) && by.as_str().starts_with(&format!("rust:{mutated}"))
             })

@@ -600,3 +600,211 @@ impl<'a> Stream for ReadyStream<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keel::plan::PlannedTest;
+    use futures::task::noop_waker;
+    use keel::{Digest, GroupId, Inputs, Kind, NetMode, Node, Plan, Platform, Policy, StoredPass};
+    use std::collections::HashMap;
+
+    fn node(id: &str, group: &str, stands_on: &[&str]) -> Node {
+        Node {
+            id: NodeId::new(id),
+            kind: Kind::RustTest,
+            group: group.parse::<GroupId>().unwrap(),
+            stands_on: stands_on.iter().map(|s| s.parse().unwrap()).collect(),
+            joins: Vec::new(),
+            inputs: Inputs::default(),
+            produces: Vec::new(),
+            via: None,
+            key: Digest::of(id.as_bytes()),
+            policy: Policy::default(),
+        }
+    }
+
+    fn plan_of(nodes: Vec<Node>, cached: &[&str]) -> Arc<KeelPlan> {
+        let platform = Platform::new("x86_64-unknown-linux-gnu", "rustc 1.0.0", NetMode::Open);
+        let plan = Plan::new(&nodes).unwrap();
+        let index: HashMap<NodeId, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id.clone(), i))
+            .collect();
+        let tests = nodes
+            .into_iter()
+            .map(|node| {
+                let cached = cached.contains(&node.id.as_str()).then(|| StoredPass {
+                    key: node.key,
+                    id: node.id.clone(),
+                    run_id: "run-0".to_owned(),
+                    recorded_at: String::new(),
+                    platform: platform.clone(),
+                    evidence: Vec::new(),
+                });
+                PlannedTest { node, cached }
+            })
+            .collect();
+        Arc::new(KeelPlan {
+            tests,
+            index,
+            plan,
+            platform,
+            reach: None,
+            key_duration: Duration::ZERO,
+            binaries_keyed: 0,
+        })
+    }
+
+    fn ran(status: Status) -> Outcome {
+        Outcome::Ran(RanOutcome {
+            status,
+            duration: Duration::from_millis(10),
+            attempts: Vec::new(),
+            summary: None,
+        })
+    }
+
+    fn next(gate: &KeelGate) -> NextGated {
+        gate.next(&noop_waker())
+    }
+
+    fn run_index(next: NextGated) -> usize {
+        match next {
+            NextGated::Item(Gated::Run(idx)) => idx,
+            other => panic!("expected a test to run, got {other:?}"),
+        }
+    }
+
+    /// `a` and `d` are in `unit(p)` and `unit(q)`; `b` stands on `unit(p)` and
+    /// `c` stands on `unit(q)`.
+    fn two_chains() -> Vec<Node> {
+        vec![
+            node("rust:p::a", "unit(p)", &[]),
+            node("rust:q::d", "unit(q)", &[]),
+            node("rust:r::b", "unit(r)", &["unit(p)"]),
+            node("rust:s::c", "unit(s)", &["unit(q)"]),
+        ]
+    }
+
+    #[test]
+    fn a_test_waits_for_everything_it_stands_on() {
+        let gate = KeelGate::new(plan_of(two_chains(), &[]), false);
+        let first = [run_index(next(&gate)), run_index(next(&gate))];
+        assert_eq!(first, [0, 1], "level 0 runs in original order");
+        assert!(matches!(next(&gate), NextGated::Pending));
+
+        gate.record(1, ran(Status::Pass));
+        assert_eq!(run_index(next(&gate)), 3, "c is free, b still waits for a");
+        assert!(matches!(next(&gate), NextGated::Pending));
+
+        gate.record(0, ran(Status::Pass));
+        assert_eq!(run_index(next(&gate)), 2);
+    }
+
+    #[test]
+    fn a_root_blocks_what_stands_on_it_and_nothing_else() {
+        let gate = KeelGate::new(plan_of(two_chains(), &[]), false);
+        let (a, d) = (run_index(next(&gate)), run_index(next(&gate)));
+        gate.record(a, ran(Status::Fail));
+        gate.record(d, ran(Status::Pass));
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            match next(&gate) {
+                NextGated::Item(Gated::Blocked(idx, by)) => seen.push((idx, by)),
+                NextGated::Item(Gated::Run(idx)) => seen.push((idx, Vec::new())),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            [(2, vec![NodeId::new("rust:p::a")]), (3, Vec::new())],
+            "b is blocked by a, c runs"
+        );
+    }
+
+    #[test]
+    fn no_block_runs_the_test_and_remembers_the_root() {
+        let gate = KeelGate::new(plan_of(two_chains(), &[]), true);
+        let (a, d) = (run_index(next(&gate)), run_index(next(&gate)));
+        gate.record(a, ran(Status::Fail));
+        gate.record(d, ran(Status::Pass));
+        let (b, c) = (run_index(next(&gate)), run_index(next(&gate)));
+        assert_eq!((b, c), (2, 3));
+        gate.record(b, ran(Status::Fail));
+        let summary = gate.summary();
+        assert_eq!(
+            summary.ran_blocked_by[&2],
+            [NodeId::new("rust:p::a")],
+            "b failed as a symptom of a"
+        );
+        assert!(!summary.ran_blocked_by.contains_key(&3));
+        assert_eq!(gate.lock().roots, [0], "only a is a root");
+    }
+
+    #[test]
+    fn cached_tests_release_what_stands_on_them_at_once() {
+        let gate = KeelGate::new(plan_of(two_chains(), &["rust:p::a"]), false);
+        assert!(matches!(
+            gate.summary().outcomes[0],
+            Some(Outcome::Cached { .. })
+        ));
+        let ready = [run_index(next(&gate)), run_index(next(&gate))];
+        assert_eq!(ready, [1, 2], "d runs, and b no longer waits for a");
+    }
+
+    #[test]
+    fn flaky_tests_do_not_block() {
+        let gate = KeelGate::new(plan_of(two_chains(), &[]), false);
+        let (a, _d) = (run_index(next(&gate)), run_index(next(&gate)));
+        gate.record(a, ran(Status::Flaky));
+        assert_eq!(run_index(next(&gate)), 2);
+    }
+
+    #[test]
+    fn cancelling_wakes_the_scheduler_and_releases_everything() {
+        let gate = KeelGate::new(plan_of(two_chains(), &[]), false);
+        let _ = (run_index(next(&gate)), run_index(next(&gate)));
+        assert!(matches!(next(&gate), NextGated::Pending));
+        gate.cancel();
+        assert!(matches!(next(&gate), NextGated::Cancelled));
+    }
+
+    #[test]
+    fn recording_a_terminal_status_wakes_a_pending_scheduler() {
+        use std::{
+            sync::atomic::{AtomicBool, Ordering},
+            task::Wake,
+        };
+        struct Flag(AtomicBool);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(flag.clone());
+
+        let gate = KeelGate::new(plan_of(two_chains(), &[]), false);
+        let (a, d) = (run_index(next(&gate)), run_index(next(&gate)));
+        assert!(matches!(gate.next(&waker), NextGated::Pending));
+        assert!(!flag.0.load(Ordering::SeqCst));
+        gate.record(a, ran(Status::Pass));
+        assert!(flag.0.load(Ordering::SeqCst), "the scheduler was woken");
+        let _ = d;
+    }
+
+    #[test]
+    fn a_test_that_does_not_block_is_still_a_root() {
+        let mut nodes = two_chains();
+        nodes[0].policy.blocks = false;
+        let gate = KeelGate::new(plan_of(nodes, &[]), false);
+        let (a, d) = (run_index(next(&gate)), run_index(next(&gate)));
+        gate.record(a, ran(Status::Fail));
+        gate.record(d, ran(Status::Pass));
+        assert_eq!(run_index(next(&gate)), 2, "b runs despite a failing");
+        assert_eq!(gate.lock().roots, [0]);
+    }
+}

@@ -233,12 +233,29 @@ fn test_argument_parsing() {
         "cargo nextest run --rerun archive.zip",
         "cargo nextest run --rerun /path/to/run.zip",
         "cargo nextest run -R ./relative/path.zip",
+        // ---
+        // Keel options
+        // ---
+        "cargo nextest run --keel",
+        "cargo nextest run --keel --keel-config .config/keel.toml --keel-store store",
+        "cargo nextest run --keel --keel-report report.json --keel-no-block",
+        "cargo nextest run --keel --keel-linker /bin/keel-ld",
+        "cargo nextest keel plan",
+        "cargo nextest keel plan --keel-config keel.toml --keel-store store -p foo",
         "cargo nextest run --rerun ../parent/run.zip",
         "cargo nextest run --rerun /proc/self/fd/11",
         "cargo nextest run -R /dev/fd/5",
     ];
 
     let invalid: &[(&'static str, ErrorKind)] = &[
+        // ---
+        // The --keel-* options require --keel
+        // ---
+        ("cargo nextest run --keel-config keel.toml", MissingRequiredArgument),
+        ("cargo nextest run --keel-store store", MissingRequiredArgument),
+        ("cargo nextest run --keel-report report.json", MissingRequiredArgument),
+        ("cargo nextest run --keel-no-block", MissingRequiredArgument),
+        ("cargo nextest run --keel-linker keel-ld", MissingRequiredArgument),
         // ---
         // --no-run and these options conflict
         // ---
