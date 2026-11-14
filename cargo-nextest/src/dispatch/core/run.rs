@@ -6,6 +6,7 @@
 use super::{
     base::BaseApp,
     filter::TestBuildFilter,
+    keel_stream::{Producer, StreamEligibility},
     value_enums::{
         FinalStatusLevelOpt, FlakyResultOpt, MessageFormat, NoTestsBehaviorOpt, ShowProgressOpt,
         StatusLevelOpt, TestOutputDisplayOpt,
@@ -29,12 +30,12 @@ use nextest_runner::{
     errors::DisplayErrorChain,
     helpers::{ShowTerminalProgress, ThemeCharacters, force_or_new_run_id, plural},
     input::InputHandlerKind,
-    keel::{KeelPlanInputs, KeelRunFacts},
+    keel::{KeelFeed, KeelPlanInputs, KeelRunFacts, predict_test_binaries},
     list::{BinaryList, ListProgressOptions, TestExecuteContext, TestList},
     record::{
-        ComputedRerunInfo, PortableRecording, RecordOpts, RecordReader, RecordRetentionPolicy,
-        RecordSession, RecordSessionConfig, RecordedBuildScope, RerunRootInfo,
-        RunIdOrRecordingSelector, RunIdSelector, RunStore, STORE_FORMAT_VERSION,
+        BuildKind, ComputedRerunInfo, PortableRecording, RecordOpts, RecordReader,
+        RecordRetentionPolicy, RecordSession, RecordSessionConfig, RecordedBuildScope,
+        RerunRootInfo, RunIdOrRecordingSelector, RunIdSelector, RunStore, STORE_FORMAT_VERSION,
         Styles as RecordStyles, records_state_dir,
     },
     redact::Redactor,
@@ -1048,11 +1049,45 @@ impl App {
         let rerun_build_scope = rerun_state.as_ref().map(|s| &s.root_info.build_scope.scope);
         let build_scope = self.base.resolve_build_scope(rerun_build_scope);
         let build_started = std::time::Instant::now();
-        let (binary_list, build_kind) = self
-            .base
-            .build_binary_list_with_scope("test", build_scope)?;
+
+        // With Keel, tests can start while Cargo is still building. That needs
+        // the build to be started now, and its messages read throughout the run.
+        let stream_blocker = keel_setup.as_ref().and_then(|_| {
+            StreamEligibility {
+                disabled: keel.keel_no_stream,
+                no_run: runner_builder.is_none(),
+                rerun: rerun.is_some(),
+                interceptor: runner_opts.interceptor.is_active(),
+                machine_output: !matches!(message_format, MessageFormat::Human),
+                recording: resolved_user_config
+                    .is_experimental_enabled(UserConfigExperimental::Record)
+                    && resolved_user_config.record.enabled,
+                reused_build: self.base.reuse_build.binaries_metadata().is_some(),
+                partitioned: self.build_filter.has_partition(),
+            }
+            .blocker(&profile)
+        });
+        if let Some(reason) = stream_blocker {
+            debug!("keel: waiting for the build before running tests: {reason}");
+        }
+        let keel_stream = match (&keel_setup, stream_blocker) {
+            (Some(_), None) => Some(self.base.spawn_binary_stream("test", build_scope)?),
+            _ => None,
+        };
+        let (binary_list, build_kind) = match &keel_stream {
+            Some(_) => (None, BuildKind::Cargo),
+            None => {
+                let (binary_list, build_kind) = self
+                    .base
+                    .build_binary_list_with_scope("test", build_scope)?;
+                (Some(binary_list), build_kind)
+            }
+        };
         let build_duration = build_started.elapsed();
-        let build_platforms = &binary_list.rust_build_meta.build_platforms.clone();
+        let build_platforms = &match &binary_list {
+            Some(binary_list) => binary_list.rust_build_meta.build_platforms.clone(),
+            None => self.base.build_platforms.clone(),
+        };
         let double_spawn = self.base.load_double_spawn();
         let target_runner = self.base.load_runner(build_platforms);
 
@@ -1072,13 +1107,17 @@ impl App {
             target_runner,
         };
 
-        let test_list = self.build_test_list(
-            &ctx,
-            binary_list,
-            &test_filter,
-            &profile,
-            reporter_opts.resolved_show_progress(&resolved_user_config.ui),
-        )?;
+        let test_list = match binary_list {
+            Some(binary_list) => self.build_test_list(
+                &ctx,
+                binary_list,
+                &test_filter,
+                &profile,
+                reporter_opts.resolved_show_progress(&resolved_user_config.ui),
+            )?,
+            None => TestList::streaming(),
+        };
+        let stream_filter = keel_stream.as_ref().map(|_| test_filter.clone());
 
         // Validate interceptor mode requirements.
         if runner_opts.interceptor.is_active() {
@@ -1154,30 +1193,48 @@ impl App {
             runner_builder.set_expected_outstanding(expected);
         }
 
-        let keel_session = match &keel_setup {
-            Some(setup) => {
+        let plan_inputs = KeelPlanInputs {
+            test_list: &test_list,
+            profile: &profile,
+            graph: self.base.graph(),
+            workspace_root: &self.base.workspace_root,
+            build_platforms,
+            target_runner,
+        };
+        let keel_planner = match (&keel_setup, &keel_stream) {
+            (Some(setup), Some(_)) => {
+                let expected = predict_test_binaries(self.base.graph(), build_scope.scope());
+                Some(
+                    setup
+                        .stream_planner(&plan_inputs, expected)
+                        .map_err(|err| ExpectedError::KeelError { err })?,
+                )
+            }
+            _ => None,
+        };
+        let keel_session = match (&keel_setup, &keel_planner) {
+            (Some(setup), Some(planner)) => {
+                let session = setup.start_streaming(planner, build_started);
+                runner_builder.set_keel(session.gate());
+                Some(session)
+            }
+            (Some(setup), None) => {
                 let plan = setup
-                    .plan(&KeelPlanInputs {
-                        test_list: &test_list,
-                        profile: &profile,
-                        graph: self.base.graph(),
-                        workspace_root: &self.base.workspace_root,
-                        build_platforms,
-                        target_runner,
-                    })
+                    .plan(&plan_inputs)
                     .map_err(|err| ExpectedError::KeelError { err })?;
                 let session = setup.start(plan, build_started, build_duration);
                 runner_builder.set_keel(session.gate());
                 Some(session)
             }
-            None => None,
+            (None, _) => None,
         };
+        let keel_feed = keel_planner.as_ref().map(|_| KeelFeed::new());
 
         // Save cli_args for recording before moving them to the runner.
         let cli_args_for_recording = cli_args.clone();
-        let runner = runner_builder.build(
+        let mut runner = runner_builder.build(
             run_id,
-            version_env_vars,
+            version_env_vars.clone(),
             &test_list,
             &profile,
             cli_args,
@@ -1186,6 +1243,9 @@ impl App {
             double_spawn.clone(),
             target_runner.clone(),
         )?;
+        if let Some(feed) = &keel_feed {
+            runner.set_keel_feed(feed.clone());
+        }
 
         // Set up recording if the experimental feature is enabled (via env var or user config)
         // AND recording is enabled in the config.
@@ -1248,7 +1308,31 @@ impl App {
         let keel_run_id = runner.run_id();
         let keel_started_at = runner.started_at();
         let run_started = std::time::Instant::now();
-        let outcome = runner.try_execute(|event| reporter.report_event(event))?;
+        let outcome = match (&keel_stream, &keel_planner, &keel_feed, &keel_session) {
+            (Some(stream), Some(planner), Some(feed), Some(session)) => {
+                let gate = session.gate();
+                let stream_filter = stream_filter
+                    .as_ref()
+                    .expect("a stream has a filter of its own");
+                let producer = Producer {
+                    app: self,
+                    stream,
+                    planner,
+                    feed,
+                    gate: &gate,
+                    profile: &profile,
+                    test_filter: stream_filter,
+                    ctx: &ctx,
+                };
+                let (outcome, produced) =
+                    producer.drive(|| runner.try_execute(|event| reporter.report_event(event)));
+                // A failure to build or to plan explains the run better than
+                // what the runner makes of the tests that did run.
+                produced?;
+                outcome?
+            }
+            _ => runner.try_execute(|event| reporter.report_event(event))?,
+        };
         let run_duration = run_started.elapsed();
         let reporter_stats = reporter.finish();
 

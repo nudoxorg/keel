@@ -10,6 +10,7 @@ mod archive;
 mod base;
 mod filter;
 mod keel;
+mod keel_stream;
 mod list;
 mod replay;
 mod run;

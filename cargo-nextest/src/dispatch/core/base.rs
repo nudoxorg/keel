@@ -475,6 +475,28 @@ impl BaseApp {
         Ok((Arc::new(binary_list), BuildKind::Cargo))
     }
 
+    /// Starts building test binaries and returns without waiting for the build.
+    ///
+    /// The caller reads Cargo's messages from the returned stream. Must not be
+    /// called when reusing a build.
+    pub(crate) fn spawn_binary_stream(
+        &self,
+        cargo_command: &str,
+        build_scope: ResolvedBuildScope<'_>,
+    ) -> Result<BinaryStream> {
+        debug_assert!(
+            self.reuse_build.binaries_metadata().is_none(),
+            "a reused build has nothing to stream"
+        );
+        self.cargo_settings.spawn_binary_stream(
+            cargo_command,
+            build_scope.scope(),
+            self.manifest_path.as_deref(),
+            self.output,
+            self.keel_build.as_ref(),
+        )
+    }
+
     #[inline]
     pub(crate) fn graph(&self) -> &PackageGraph {
         &self.package_graph
@@ -543,8 +565,21 @@ pub(crate) fn current_version() -> Version {
     }
 }
 
+/// A Cargo build whose messages are read as they arrive.
+pub(crate) struct BinaryStream {
+    /// The running build. Its standard output carries the JSON messages.
+    pub(crate) reader: duct::ReaderHandle,
+
+    /// The command line, for error messages.
+    pub(crate) command: Vec<String>,
+
+    /// Whether the JSON messages are also forwarded to standard output.
+    pub(crate) forward_json: bool,
+}
+
 // Helper for CargoBuildSettings.
 mod helpers {
+    use super::BinaryStream;
     use crate::{
         ExpectedError, Result,
         cargo_cli::{CargoBuildSettings, CargoCli, KeelBuildFlags},
@@ -561,16 +596,14 @@ mod helpers {
     use std::io::{BufRead, BufReader};
 
     impl CargoBuildSettings {
-        pub(crate) fn compute_binary_list(
+        fn make_test_build_cli<'a>(
             &self,
-            cargo_command: &str,
+            cargo_command: &'a str,
             build_scope: &BuildScope,
-            graph: &PackageGraph,
             manifest_path: Option<&Utf8Path>,
             output: OutputContext,
-            build_platforms: BuildPlatforms,
             keel: Option<&KeelBuildFlags>,
-        ) -> Result<BinaryList> {
+        ) -> Result<(CargoCli<'a>, bool)> {
             // Don't use the manifest path from the graph to ensure that if the user cd's into a
             // particular crate and runs cargo nextest, then it behaves identically to cargo test.
             let mut cargo_cli = CargoCli::new(cargo_command, manifest_path, output);
@@ -585,13 +618,53 @@ mod helpers {
             if let Some(keel) = keel {
                 cargo_cli.add_keel_flags(keel);
             }
+            Ok((cargo_cli, message_format.forward_json()))
+        }
 
-            Self::run_cargo_build(
-                cargo_cli,
-                graph,
-                build_platforms,
-                message_format.forward_json(),
-            )
+        pub(crate) fn compute_binary_list(
+            &self,
+            cargo_command: &str,
+            build_scope: &BuildScope,
+            graph: &PackageGraph,
+            manifest_path: Option<&Utf8Path>,
+            output: OutputContext,
+            build_platforms: BuildPlatforms,
+            keel: Option<&KeelBuildFlags>,
+        ) -> Result<BinaryList> {
+            let (cargo_cli, forward_json) =
+                self.make_test_build_cli(cargo_command, build_scope, manifest_path, output, keel)?;
+
+            Self::run_cargo_build(cargo_cli, graph, build_platforms, forward_json)
+        }
+
+        /// Starts the build and returns without waiting for it, so that the
+        /// caller can read the messages as Cargo writes them.
+        pub(crate) fn spawn_binary_stream(
+            &self,
+            cargo_command: &str,
+            build_scope: &BuildScope,
+            manifest_path: Option<&Utf8Path>,
+            output: OutputContext,
+            keel: Option<&KeelBuildFlags>,
+        ) -> Result<BinaryStream> {
+            let (cargo_cli, forward_json) =
+                self.make_test_build_cli(cargo_command, build_scope, manifest_path, output, keel)?;
+            let command: Vec<String> = cargo_cli
+                .all_args()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let reader = cargo_cli
+                .to_expression()
+                .stdout_capture()
+                .unchecked()
+                .reader()
+                .map_err(|err| ExpectedError::build_exec_failed(&command, err))?;
+            Ok(BinaryStream {
+                reader,
+                command,
+                forward_json,
+            })
         }
 
         fn run_cargo_build(

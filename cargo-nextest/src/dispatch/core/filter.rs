@@ -150,6 +150,11 @@ impl TestBuildFilter {
         .map_err(|err| ExpectedError::CreateTestListError { err })
     }
 
+    /// Returns true if the tests are partitioned.
+    pub(crate) fn has_partition(&self) -> bool {
+        self.partition.is_some()
+    }
+
     pub(crate) fn make_test_filter(
         &self,
         mode: NextestRunMode,

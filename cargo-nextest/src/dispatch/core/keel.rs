@@ -78,6 +78,15 @@ pub(crate) struct KeelOpts {
     /// `target.<triple>.linker` for the build.
     #[arg(long, value_name = "PATH", requires = "keel")]
     pub(crate) keel_linker: Option<Utf8PathBuf>,
+
+    /// Wait for the build to finish before listing and running tests.
+    ///
+    /// By default, each test binary is listed, keyed and scheduled as soon as
+    /// Cargo reports it, while the rest of the workspace is still compiling.
+    /// Streaming is also off when it cannot work, for example with `--rerun`,
+    /// `--partition`, a reused build, setup scripts, or a debugger.
+    #[arg(long, requires = "keel")]
+    pub(crate) keel_no_stream: bool,
 }
 
 impl KeelOpts {
