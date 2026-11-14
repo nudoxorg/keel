@@ -69,8 +69,14 @@ struct Run {
 }
 
 /// How long the build script of the crate that keeps Cargo busy at the end of
-/// the build sleeps, in seconds.
-const TAIL_SECONDS: u64 = 3;
+/// the cold build sleeps, in seconds.
+///
+/// The crate has no dependents and no tests, so its build script can take any
+/// time without changing the key of any test.
+const COLD_TAIL_SECONDS: u64 = 8;
+
+/// How long it sleeps in the other scenarios.
+const TAIL_SECONDS: u64 = 1;
 
 /// Parses a report, taking the milestones out of `stages` first because
 /// `keel::Report` rejects fields it does not know.
@@ -147,13 +153,23 @@ impl Harness {
         fs::create_dir_all(&config).expect("create .config");
         fs::write(config.join("keel.toml"), "schema = 1\n").expect("write keel.toml");
 
+        // The build script of the tail crate runs only after every other crate
+        // is built, because they are its build dependencies. Its sleep therefore
+        // starts when the other crates are done, not when the build starts.
+        let synth: Value = serde_json::from_str(
+            &fs::read_to_string(self.workspace.join("synth.json")).expect("synth.json"),
+        )
+        .expect("synth.json parses");
+        let mut manifest = String::from(
+            "[package]\nname = \"zz-tail\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[build-dependencies]\n",
+        );
+        for krate in synth["crates"].as_array().expect("crates") {
+            let name = krate["name"].as_str().expect("name");
+            manifest.push_str(&format!("{name} = {{ path = \"../{name}\" }}\n"));
+        }
         let tail = self.workspace.join("crates/zz-tail");
         fs::create_dir_all(tail.join("src")).expect("create the tail crate");
-        fs::write(
-            tail.join("Cargo.toml"),
-            "[package]\nname = \"zz-tail\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n",
-        )
-        .expect("write the tail crate manifest");
+        fs::write(tail.join("Cargo.toml"), manifest).expect("write the tail crate manifest");
         fs::write(
             tail.join("build.rs"),
             format!(
@@ -309,7 +325,7 @@ fn dependents_closure(synth: &Value, name: &str) -> BTreeSet<String> {
 #[test]
 fn keel_acceptance() {
     let mut h = Harness::new();
-    h.generate();
+    h.generate_with_tail(COLD_TAIL_SECONDS);
     let synth: Value = serde_json::from_str(
         &fs::read_to_string(h.workspace.join("synth.json")).expect("synth.json"),
     )
