@@ -599,6 +599,11 @@ impl<'a> DisplayReporterImpl<'a> {
 
                 write!(writer, "{:>12} ", "Starting".style(self.styles.pass))?;
 
+                if test_list.is_streaming() {
+                    writeln!(writer, "tests as Cargo finishes building their binaries")?;
+                    return Ok(());
+                }
+
                 let count_style = self.styles.count;
 
                 let tests_str = plural::tests_str(self.mode, test_list.run_count());

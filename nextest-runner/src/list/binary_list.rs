@@ -259,6 +259,27 @@ impl<'g> BinaryListBuilder<'g> {
         self.process_message(parse_message_line(line))
     }
 
+    /// Takes the test binaries that messages have added since the last call.
+    ///
+    /// A streaming consumer calls this after each message to find out whether
+    /// the message completed a test binary. [`finish`](Self::finish) still
+    /// returns every binary, including the ones taken here.
+    pub fn take_new_binaries(&mut self) -> Vec<RustTestBinary> {
+        self.state.take_new_binaries()
+    }
+
+    /// Returns a binary list holding `binaries` and the build metadata
+    /// gathered so far.
+    ///
+    /// The metadata is what [`finish`](Self::finish) would return, restricted
+    /// to the packages of `binaries`. For a binary just taken with
+    /// [`take_new_binaries`](Self::take_new_binaries), it contains everything the
+    /// binary's tests need to run: the build scripts and binaries of its
+    /// dependencies have been built before Cargo reports the binary.
+    pub fn snapshot(&self, binaries: Vec<RustTestBinary>) -> BinaryList {
+        self.state.snapshot(binaries)
+    }
+
     /// Finishes building the binary list.
     pub fn finish(self) -> BinaryList {
         self.state.finish()
@@ -276,6 +297,8 @@ fn parse_message_line(line: &str) -> Message {
 struct BinaryListBuildState<'g> {
     graph: &'g PackageGraph,
     rust_binaries: Vec<RustTestBinary>,
+    // The number of leading entries of rust_binaries that have been taken.
+    taken: usize,
     rust_build_meta: RustBuildMeta<BinaryListState>,
     alt_target_dir: Option<Utf8PathBuf>,
 }
@@ -298,6 +321,7 @@ impl<'g> BinaryListBuildState<'g> {
         Self {
             graph,
             rust_binaries: vec![],
+            taken: 0,
             rust_build_meta: RustBuildMeta::new(rust_target_dir, build_directory, build_platforms),
             alt_target_dir,
         }
@@ -592,22 +616,25 @@ impl<'g> BinaryListBuildState<'g> {
         Some(())
     }
 
+    fn take_new_binaries(&mut self) -> Vec<RustTestBinary> {
+        let new = self.rust_binaries[self.taken..].to_vec();
+        self.taken = self.rust_binaries.len();
+        new
+    }
+
+    fn snapshot(&self, binaries: Vec<RustTestBinary>) -> BinaryList {
+        let mut rust_build_meta = self.rust_build_meta.clone();
+        retain_relevant_build_scripts(&mut rust_build_meta, &binaries);
+        BinaryList {
+            rust_build_meta,
+            rust_binaries: binaries,
+        }
+    }
+
     fn finish(mut self) -> BinaryList {
         self.rust_binaries.sort_by(|b1, b2| b1.id.cmp(&b2.id));
 
-        // Clean out any build script output directories for which there's no corresponding binary.
-        let relevant_package_ids = self
-            .rust_binaries
-            .iter()
-            .map(|bin| bin.package_id.clone())
-            .collect::<HashSet<_>>();
-
-        self.rust_build_meta
-            .build_script_out_dirs
-            .retain(|package_id, _| relevant_package_ids.contains(package_id));
-        if let Some(info) = &mut self.rust_build_meta.build_script_info {
-            info.retain(|package_id, _| relevant_package_ids.contains(package_id));
-        }
+        retain_relevant_build_scripts(&mut self.rust_build_meta, &self.rust_binaries);
 
         // All test binaries live inside a base output dir under both Cargo
         // layouts, so an empty set suggests that we didn't recognize the
@@ -628,6 +655,25 @@ impl<'g> BinaryListBuildState<'g> {
             rust_build_meta: self.rust_build_meta,
             rust_binaries: self.rust_binaries,
         }
+    }
+}
+
+/// Cleans out any build script output directories for which there's no
+/// corresponding binary.
+fn retain_relevant_build_scripts(
+    rust_build_meta: &mut RustBuildMeta<BinaryListState>,
+    binaries: &[RustTestBinary],
+) {
+    let relevant_package_ids = binaries
+        .iter()
+        .map(|bin| bin.package_id.clone())
+        .collect::<HashSet<_>>();
+
+    rust_build_meta
+        .build_script_out_dirs
+        .retain(|package_id, _| relevant_package_ids.contains(package_id));
+    if let Some(info) = &mut rust_build_meta.build_script_info {
+        info.retain(|package_id, _| relevant_package_ids.contains(package_id));
     }
 }
 
@@ -1010,6 +1056,72 @@ mod tests {
                 .to_string(OutputFormat::Serializable(SerializableFormat::JsonPretty))
                 .expect("json-pretty succeeds")
         );
+    }
+
+    #[test]
+    fn test_take_new_binaries_returns_each_binary_once() {
+        let build_platforms = BuildPlatforms {
+            host: HostPlatform {
+                platform: TargetTriple::x86_64_unknown_linux_gnu().platform,
+                libdir: PlatformLibdir::Available("/fake/libdir".into()),
+            },
+            target: None,
+        };
+        let package = package_metadata();
+        let artifact_path = PACKAGE_GRAPH_FIXTURE
+            .workspace()
+            .build_directory()
+            .expect("fixture sets build_directory")
+            .join("debug/deps/metadata_helper-test");
+        let test_artifact = artifact_json(
+            package.name(),
+            &["lib"],
+            std::slice::from_ref(&artifact_path),
+            Some(&artifact_path),
+            TestTarget::Yes,
+        );
+        let non_test_artifact = artifact_json(
+            package.name(),
+            &["lib"],
+            std::slice::from_ref(&artifact_path),
+            Some(&artifact_path),
+            TestTarget::No,
+        );
+
+        let mut builder = BinaryListBuilder::new(&PACKAGE_GRAPH_FIXTURE, build_platforms);
+        builder
+            .process_message_line(&non_test_artifact.to_string())
+            .expect("processing line succeeds");
+        assert!(
+            builder.take_new_binaries().is_empty(),
+            "an artifact that is not a test binary adds nothing"
+        );
+
+        builder
+            .process_message_line(&test_artifact.to_string())
+            .expect("processing line succeeds");
+        let taken = builder.take_new_binaries();
+        assert_eq!(taken.len(), 1, "the test binary is taken: {taken:?}");
+        assert!(
+            builder.take_new_binaries().is_empty(),
+            "a binary is taken once"
+        );
+
+        let snapshot = builder.snapshot(taken.clone());
+        assert_eq!(snapshot.rust_binaries.len(), 1);
+        assert_eq!(
+            snapshot.rust_build_meta.base_output_directories,
+            btreeset! { Utf8PathBuf::from("debug") },
+            "the snapshot carries the metadata gathered so far"
+        );
+
+        let finished = builder.finish();
+        assert_eq!(
+            finished.rust_binaries.len(),
+            1,
+            "finish still returns binaries that were taken"
+        );
+        assert_eq!(finished.rust_binaries[0].id, taken[0].id);
     }
 
     #[test]

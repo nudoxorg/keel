@@ -1205,6 +1205,17 @@ impl<'cfg> EvaluatableProfile<'cfg> {
         SetupScripts::new(self, test_list)
     }
 
+    /// Returns true if any `[[profile.*.scripts]]` section applies to this
+    /// profile.
+    ///
+    /// Which setup scripts run depends on which tests exist, so a caller that
+    /// has not listed every test yet cannot know whether a setup script will
+    /// run. This is the conservative answer: it is true even if no test would
+    /// enable the script.
+    pub fn has_scripts(&self) -> bool {
+        !self.compiled_data.scripts.is_empty()
+    }
+
     /// Returns list-time settings for a test binary.
     pub fn list_settings_for(&self, query: &BinaryQuery<'_>) -> ListSettings<'_> {
         ListSettings::new(self, query)

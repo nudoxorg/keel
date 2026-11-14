@@ -215,6 +215,7 @@ impl<'a> ExecutorContext<'a> {
     ) {
         debug!(test_name = %test.instance.name, "running test");
 
+        let test_list: &'a TestList<'a> = *test.list;
         let settings = Arc::new(test.settings);
 
         let retry_policy = self.force_retries.unwrap_or_else(|| settings.retries());
@@ -250,7 +251,7 @@ impl<'a> ExecutorContext<'a> {
         let ctx = self.test_execute_context();
         let command_line = test.instance.command_line(
             &ctx,
-            self.test_list,
+            test_list,
             settings.run_wrapper(),
             settings.run_extra_args(),
         );
@@ -316,6 +317,7 @@ impl<'a> ExecutorContext<'a> {
                 test_instance: test.instance,
                 cx: cx.clone(),
                 retry_data,
+                test_list,
                 settings: settings.clone(),
                 setup_script_data: setup_script_data.clone(),
                 delay_before_start: delay,
@@ -735,7 +737,7 @@ impl<'a> ExecutorContext<'a> {
         let ctx = self.test_execute_context();
         let mut cmd = test.test_instance.make_command(
             &ctx,
-            self.test_list,
+            test.test_list,
             test.settings.run_wrapper(),
             test.settings.run_extra_args(),
             &self.interceptor,
@@ -751,7 +753,7 @@ impl<'a> ExecutorContext<'a> {
 
         // Test-related environment variables.
         command_mut.env("NEXTEST_RUN_ID", self.run_id.to_string());
-        command_mut.env("NEXTEST_RUN_MODE", self.test_list.mode().to_string());
+        command_mut.env("NEXTEST_RUN_MODE", test.test_list.mode().to_string());
         command_mut.env(
             "NEXTEST_BINARY_ID",
             test.test_instance.suite_info.binary_id.as_str(),
@@ -807,7 +809,7 @@ impl<'a> ExecutorContext<'a> {
         command_mut.env("NEXTEST_TEST_THREADS", self.test_threads.to_string());
         command_mut.env(
             "NEXTEST_WORKSPACE_ROOT",
-            self.test_list.workspace_root().as_str(),
+            test.test_list.workspace_root().as_str(),
         );
         self.version_env_vars.apply_env(command_mut);
 
@@ -1261,6 +1263,7 @@ impl UnitPacket<'_> {
 #[derive(Clone)]
 pub(super) struct TestPacket<'a> {
     stress_index: Option<StressIndex>,
+    test_list: &'a TestList<'a>,
     test_instance: TestInstance<'a>,
     cx: FutureQueueContext,
     retry_data: RetryData,

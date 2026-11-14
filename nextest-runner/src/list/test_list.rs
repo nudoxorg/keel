@@ -244,6 +244,7 @@ pub struct TestList<'g> {
     updated_dylib_path: OsString,
     // Computed on first access.
     skip_counts: OnceLock<SkipCounts>,
+    streaming: bool,
 }
 
 impl<'g> TestList<'g> {
@@ -397,6 +398,7 @@ impl<'g> TestList<'g> {
             updated_dylib_path,
             test_count,
             skip_counts: OnceLock::new(),
+            streaming: false,
         })
     }
 
@@ -457,6 +459,7 @@ impl<'g> TestList<'g> {
             updated_dylib_path,
             test_count,
             skip_counts: OnceLock::new(),
+            streaming: false,
         })
     }
 
@@ -549,6 +552,7 @@ impl<'g> TestList<'g> {
             updated_dylib_path,
             test_count,
             skip_counts: OnceLock::new(),
+            streaming: false,
         })
     }
 
@@ -750,7 +754,27 @@ impl<'g> TestList<'g> {
             updated_dylib_path: OsString::new(),
             rust_suites: IdOrdMap::new(),
             skip_counts: OnceLock::new(),
+            streaming: false,
         }
+    }
+
+    /// Creates an empty test list for a run whose tests arrive while the run
+    /// is under way.
+    ///
+    /// Keel streams tests to the runner while Cargo is still building, so the
+    /// list the runner and the reporter see holds no tests: the tests of each
+    /// binary come with their own list, through [`TestInstanceWithSettings`].
+    pub fn streaming() -> Self {
+        Self {
+            streaming: true,
+            ..Self::empty()
+        }
+    }
+
+    /// Returns true if this list stands for a run whose tests arrive while the
+    /// run is under way. See [`streaming`](Self::streaming).
+    pub fn is_streaming(&self) -> bool {
+        self.streaming
     }
 
     pub(crate) fn create_dylib_path(
@@ -1267,7 +1291,11 @@ impl<'a> TestPriorityQueue<'a> {
             .iter_tests()
             .map(|instance| {
                 let settings = profile.settings_for(mode, &instance.to_test_query());
-                TestInstanceWithSettings { instance, settings }
+                TestInstanceWithSettings {
+                    instance,
+                    settings,
+                    list: DebugIgnore(test_list),
+                }
             })
             .collect::<Vec<_>>();
         // Note: this is a stable sort so that tests with the same priority are
@@ -1297,6 +1325,14 @@ pub struct TestInstanceWithSettings<'a> {
 
     /// The settings for this test.
     pub settings: TestSettings<'a>,
+
+    /// The test list this test was taken from.
+    ///
+    /// The executor builds the test's command from this list rather than from
+    /// the runner's list, so that tests can come from several lists. A Keel run
+    /// that streams tests while Cargo is still building lists each binary as it is
+    /// built, and each list carries the build metadata as of that binary.
+    pub(crate) list: DebugIgnore<&'a TestList<'a>>,
 }
 
 /// A suite of tests within a single Rust test binary.
