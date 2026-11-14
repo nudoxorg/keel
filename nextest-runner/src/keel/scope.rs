@@ -155,6 +155,117 @@ fn glob_matches(pattern: &[u8], text: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_scope::{FeatureSelection, NamedTargets, PackageSpec};
+    use guppy::CargoMetadata;
+
+    fn fixture_graph() -> PackageGraph {
+        static FIXTURE_JSON: &str = include_str!("../../../fixtures/cargo-metadata.json");
+        CargoMetadata::parse_json(FIXTURE_JSON)
+            .expect("fixture is valid JSON")
+            .build_graph()
+            .expect("fixture is a valid package graph")
+    }
+
+    fn scope(packages: PackageSelection, targets: TargetSelection) -> BuildScope {
+        BuildScope::new(
+            packages,
+            targets,
+            FeatureSelection {
+                features: Vec::new(),
+                all_features: false,
+                no_default_features: false,
+            },
+        )
+    }
+
+    fn specs(specs: &[&str]) -> Vec<PackageSpec> {
+        specs
+            .iter()
+            .map(|spec| PackageSpec::new(spec).expect("valid package spec"))
+            .collect()
+    }
+
+    fn packages(selected: &[&str], workspace: bool, exclude: &[&str]) -> PackageSelection {
+        PackageSelection {
+            specs: specs(selected),
+            workspace,
+            exclude: specs(exclude),
+        }
+    }
+
+    fn no_targets() -> TargetSelection {
+        TargetSelection {
+            lib: false,
+            bins: NamedTargets::empty(),
+            examples: NamedTargets::empty(),
+            tests: NamedTargets::empty(),
+            benches: NamedTargets::empty(),
+            all_targets: false,
+        }
+    }
+
+    fn ids(graph: &PackageGraph, scope: &BuildScope) -> Vec<(String, String)> {
+        predict_test_binaries(graph, scope)
+            .into_iter()
+            .map(|binary| (binary.id.to_string(), binary.group.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_scope_expects_the_library_of_every_package() {
+        let graph = fixture_graph();
+        assert_eq!(
+            ids(&graph, &scope(packages(&[], false, &[]), no_targets())),
+            [("metadata-base".to_owned(), "unit(metadata-base)".to_owned())]
+        );
+    }
+
+    #[test]
+    fn packages_outside_the_selection_expect_nothing() {
+        let graph = fixture_graph();
+        let other = scope(packages(&["something-else"], false, &[]), no_targets());
+        assert!(ids(&graph, &other).is_empty());
+        let named = scope(packages(&["metadata-base@0.1.0"], false, &[]), no_targets());
+        assert_eq!(ids(&graph, &named).len(), 1);
+        let excluded = scope(packages(&[], true, &["metadata-base"]), no_targets());
+        assert!(ids(&graph, &excluded).is_empty());
+        let pattern_excluded = scope(packages(&[], true, &["metadata-*"]), no_targets());
+        assert_eq!(
+            ids(&graph, &pattern_excluded).len(),
+            1,
+            "a pattern never removes a package, because it might match fewer than it seems"
+        );
+    }
+
+    #[test]
+    fn target_flags_narrow_the_expected_binaries() {
+        let graph = fixture_graph();
+        let lib = TargetSelection {
+            lib: true,
+            ..no_targets()
+        };
+        assert_eq!(ids(&graph, &scope(packages(&[], false, &[]), lib)).len(), 1);
+        let tests_only = TargetSelection {
+            tests: NamedTargets {
+                names: vec!["it".to_owned()],
+                all: false,
+            },
+            ..no_targets()
+        };
+        assert!(ids(&graph, &scope(packages(&[], false, &[]), tests_only)).is_empty());
+        let all_tests = TargetSelection {
+            tests: NamedTargets {
+                names: Vec::new(),
+                all: true,
+            },
+            ..no_targets()
+        };
+        assert_eq!(
+            ids(&graph, &scope(packages(&[], false, &[]), all_tests)).len(),
+            1,
+            "--tests also tests the library"
+        );
+    }
 
     #[test]
     fn plain_specs_select_exactly_their_package() {

@@ -525,7 +525,22 @@ where
         HandleEventResponse::None
     }
 
+    /// Brings the number of tests the run expects up to the number Keel has
+    /// planned so far.
+    ///
+    /// A Keel run whose tests arrive while Cargo is building does not know
+    /// how many tests it has until the build ends. The count only grows.
+    fn sync_keel_run_count(&mut self) {
+        if let Some(gate) = &self.keel {
+            let known = gate.known_run_count();
+            if known > self.run_stats.initial_run_count {
+                self.run_stats.initial_run_count = known;
+            }
+        }
+    }
+
     fn handle_event(&mut self, event: InternalEvent<'a>) -> HandleEventResponse {
+        self.sync_keel_run_count();
         match event {
             InternalEvent::Tick => {
                 (self.callback)(ReporterEvent::Tick);
@@ -1202,6 +1217,7 @@ where
 
     pub(super) fn run_finished(&mut self) -> RunOutcome {
         let stopwatch_end = self.stopwatch.snapshot();
+        self.sync_keel_run_count();
 
         let final_stats = self.run_stats.summarize_final();
         let outcome = self.stress_cx.final_outcome(final_stats);

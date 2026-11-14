@@ -298,7 +298,17 @@ impl<'g> TestList<'g> {
             let mut list_progress =
                 ListProgressReporter::new(test_artifacts.len(), &list_progress_options);
 
-            let runtime = Runtime::new().map_err(CreateTestListError::TokioRuntimeCreate)?;
+            // Listing one binary needs no worker threads, and a caller that lists
+            // binaries one at a time, as Keel does when it streams a build, would
+            // otherwise start a full set of them for every binary.
+            let runtime = if test_artifacts.len() == 1 {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            } else {
+                Runtime::new()
+            }
+            .map_err(CreateTestListError::TokioRuntimeCreate)?;
 
             // Phase 1: run test binaries and parse their output. Binary-level
             // filtering decides which binaries to execute; test-level filtering is

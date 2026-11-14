@@ -988,6 +988,17 @@ impl<'cfg> EarlyProfile<'cfg> {
         profile_field_optional!(self.junit.path.as_deref()).is_some()
     }
 
+    /// Returns true if any `[[profile.*.scripts]]` section applies to this
+    /// profile.
+    ///
+    /// Which setup scripts run depends on which tests exist, so a caller that
+    /// has not listed every test yet cannot know whether a setup script will
+    /// run. This is the conservative answer: it is true even if no test would
+    /// enable the script.
+    pub fn has_scripts(&self) -> bool {
+        !self.compiled_data.scripts.is_empty()
+    }
+
     /// Returns the global test group configuration.
     pub fn test_group_config(&self) -> &'cfg BTreeMap<CustomTestGroup, TestGroupConfig> {
         self.test_groups
@@ -1203,17 +1214,6 @@ impl<'cfg> EvaluatableProfile<'cfg> {
     /// Returns the list of setup scripts.
     pub fn setup_scripts(&self, test_list: &TestList<'_>) -> SetupScripts<'_> {
         SetupScripts::new(self, test_list)
-    }
-
-    /// Returns true if any `[[profile.*.scripts]]` section applies to this
-    /// profile.
-    ///
-    /// Which setup scripts run depends on which tests exist, so a caller that
-    /// has not listed every test yet cannot know whether a setup script will
-    /// run. This is the conservative answer: it is true even if no test would
-    /// enable the script.
-    pub fn has_scripts(&self) -> bool {
-        !self.compiled_data.scripts.is_empty()
     }
 
     /// Returns list-time settings for a test binary.

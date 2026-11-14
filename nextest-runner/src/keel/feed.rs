@@ -142,3 +142,64 @@ impl<'a> KeelFeed<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Wake,
+    };
+
+    struct Counter(AtomicUsize);
+
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn binary() -> FedBinary<'static> {
+        FedBinary::without_tests(None, Vec::new(), Duration::ZERO)
+    }
+
+    #[test]
+    fn a_push_wakes_the_consumer_that_drained_last_and_a_drain_takes_everything() {
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let feed = KeelFeed::new();
+
+        let first = feed.drain(&waker);
+        assert!(first.binaries.is_empty());
+        assert!(!first.closed);
+
+        feed.push(binary());
+        feed.push(binary());
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            1,
+            "one wake: the consumer is woken once and then drains everything"
+        );
+        let second = feed.drain(&waker);
+        assert_eq!(second.binaries.len(), 2);
+        assert!(feed.drain(&waker).binaries.is_empty());
+    }
+
+    #[test]
+    fn closing_wakes_the_consumer_and_is_seen_after_the_last_binary() {
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let feed = KeelFeed::new();
+        feed.drain(&waker);
+        feed.push(binary());
+        feed.close();
+        let drained = feed.drain(&waker);
+        assert_eq!(
+            drained.binaries.len(),
+            1,
+            "a binary pushed before close is kept"
+        );
+        assert!(drained.closed);
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+    }
+}

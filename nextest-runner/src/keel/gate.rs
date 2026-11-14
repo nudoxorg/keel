@@ -469,6 +469,12 @@ impl KeelGate {
         self.options.fail_fast_verdict
     }
 
+    /// Returns the number of tests the gate knows, which are the tests of the
+    /// run that match the filter.
+    pub(crate) fn known_run_count(&self) -> usize {
+        self.lock().nodes.len()
+    }
+
     /// Returns the time since the run started.
     pub fn elapsed(&self) -> Duration {
         self.options.started.elapsed()
@@ -573,7 +579,7 @@ impl KeelGate {
     }
 
     /// Marks the run as cancelled: every remaining test is released.
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         let waker = {
             let mut state = self.lock();
             state.cancelled = true;
