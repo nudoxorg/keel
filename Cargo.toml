@@ -94,6 +94,9 @@ maplit = "1.0.2"
 miette = "7.6.0"
 mukti-metadata = "0.4.0"
 newtype-uuid = { version = "1.4.0", features = ["v4"] }
+# The Keel framework crates live outside this workspace, in the enclosing repository.
+keel = { path = "../crates/keel" }
+keel-decl = { path = "../crates/keel-decl" }
 nextest-filtering = { version = "0.23.0", path = "nextest-filtering" }
 nextest-metadata = { version = "0.15.0", path = "nextest-metadata" }
 nextest-runner = { path = "nextest-runner" }

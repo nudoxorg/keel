@@ -48,6 +48,8 @@ indicatif.workspace = true
 indoc.workspace = true
 is_ci.workspace = true
 itertools.workspace = true
+keel.workspace = true
+keel-decl.workspace = true
 miette.workspace = true
 newtype-uuid = { workspace = true, features = ["serde"] }
 nextest-filtering.workspace = true

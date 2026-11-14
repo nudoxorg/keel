@@ -14,6 +14,7 @@ use crate::{
         TestRunnerBuildError, TestRunnerExecuteErrors, TracerCommandParseError,
     },
     input::{InputHandler, InputHandlerKind, InputHandlerStatus},
+    keel::{KeelGate, ReadyStream, ReadyTest},
     list::{OwnedTestInstanceId, TestInstanceWithSettings, TestList},
     reporter::events::{ReporterEvent, RunOutcome, StressIndex},
     runner::ExecutorEvent,
@@ -267,6 +268,7 @@ pub struct TestRunnerBuilder {
     stress_condition: Option<StressCondition>,
     interceptor: Interceptor,
     expected_outstanding: Option<BTreeSet<OwnedTestInstanceId>>,
+    keel: Option<Arc<KeelGate>>,
 }
 
 impl TestRunnerBuilder {
@@ -334,6 +336,17 @@ impl TestRunnerBuilder {
         self
     }
 
+    /// Schedules tests through a Keel gate.
+    ///
+    /// Tests then run only after the tests they stand on are terminal, tests
+    /// with a stored pass are reported as cached, and tests blocked by a failed
+    /// root are reported as blocked. Unless a maximum number of failures was
+    /// set, a failure does not stop the run: it blocks only what stands on it.
+    pub fn set_keel(&mut self, gate: Arc<KeelGate>) -> &mut Self {
+        self.keel = Some(gate);
+        self
+    }
+
     /// Creates a new test runner.
     ///
     /// `run_id` identifies this invocation. The caller should generate it via
@@ -359,7 +372,13 @@ impl TestRunnerBuilder {
                 .unwrap_or_else(|| profile.test_threads())
                 .compute(),
         };
-        let max_fail = self.max_fail.unwrap_or_else(|| profile.max_fail());
+        let max_fail = self.max_fail.unwrap_or_else(|| {
+            if self.keel.is_some() {
+                MaxFail::All
+            } else {
+                profile.max_fail()
+            }
+        });
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -390,6 +409,7 @@ impl TestRunnerBuilder {
                 stress_condition: self.stress_condition,
                 interceptor: self.interceptor,
                 expected_outstanding: self.expected_outstanding,
+                keel: self.keel,
                 version_env_vars,
                 runtime,
             },
@@ -567,6 +587,7 @@ struct TestRunnerInner<'a> {
     stress_condition: Option<StressCondition>,
     interceptor: Interceptor,
     expected_outstanding: Option<BTreeSet<OwnedTestInstanceId>>,
+    keel: Option<Arc<KeelGate>>,
     version_env_vars: VersionEnvVars,
     runtime: Runtime,
 }
@@ -616,6 +637,8 @@ impl<'a> TestRunnerInner<'a> {
             self.interceptor.clone(),
             self.version_env_vars.clone(),
         );
+
+        dispatcher_cx.set_keel_gate(self.keel.clone());
 
         // Send the initial event.
         dispatcher_cx.run_started(self.test_list, self.test_threads);
@@ -716,8 +739,14 @@ impl<'a> TestRunnerInner<'a> {
             let filter_resp_tx = resp_tx.clone();
 
             let tests = self.test_list.to_priority_queue(self.profile);
-            let run_tests_fut = futures::stream::iter(tests)
-                .filter_map(move |test| {
+            let ready = match &self.keel {
+                Some(gate) => ReadyStream::new(gate.clone(), tests).left_stream(),
+                None => futures::stream::iter(tests)
+                    .map(ReadyTest::Run)
+                    .right_stream(),
+            };
+            let run_tests_fut = ready
+                .filter_map(move |ready_test| {
                     // Filter tests before assigning a FutureQueueContext to
                     // them.
                     //
@@ -727,6 +756,25 @@ impl<'a> TestRunnerInner<'a> {
                     // all at once.
                     let filter_resp_tx = filter_resp_tx.clone();
                     async move {
+                        let test = match ready_test {
+                            ReadyTest::Run(test) => test,
+                            ReadyTest::Blocked { test, blocked_by } => {
+                                let _ = filter_resp_tx.send(ExecutorEvent::Blocked {
+                                    stress_index,
+                                    test_instance: test.instance,
+                                    blocked_by,
+                                });
+                                return None;
+                            }
+                            ReadyTest::Cached { test, cached_from } => {
+                                let _ = filter_resp_tx.send(ExecutorEvent::Cached {
+                                    stress_index,
+                                    test_instance: test.instance,
+                                    cached_from,
+                                });
+                                return None;
+                            }
+                        };
                         if let FilterMatch::Mismatch { reason } =
                             test.instance.test_info.filter_match
                         {

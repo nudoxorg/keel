@@ -14,6 +14,7 @@ use crate::{
         scripts::{ScriptId, SetupScriptConfig},
     },
     input::{InputEvent, InputHandler},
+    keel::KeelGate,
     list::{OwnedTestInstanceId, TestInstance, TestInstanceId, TestInstanceIdKey, TestList},
     output_spec::LiveSpec,
     reporter::events::{
@@ -34,7 +35,7 @@ use debug_ignore::DebugIgnore;
 use futures::future::{Fuse, FusedFuture};
 use iddqd::{IdOrdItem, IdOrdMap, id_upcast};
 use quick_junit::ReportUuid;
-use std::{collections::BTreeSet, env, mem, pin::Pin, time::Duration};
+use std::{collections::BTreeSet, env, mem, pin::Pin, sync::Arc, time::Duration};
 use tokio::{
     sync::{
         mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -65,6 +66,7 @@ pub(super) struct DispatcherContext<'a, F> {
     stress_cx: DispatcherStressContext,
     tick_interval: Duration,
     rerun_cx: DispatcherRerunContext,
+    keel: Option<Arc<KeelGate>>,
     #[cfg(test)]
     disable_signal_3_times_panic: bool,
 }
@@ -108,9 +110,15 @@ where
             stress_cx: DispatcherStressContext::new(stress_condition),
             tick_interval: Duration::from_millis(tick_interval_ms),
             rerun_cx: DispatcherRerunContext::new(expected_outstanding),
+            keel: None,
             #[cfg(test)]
             disable_signal_3_times_panic: false,
         }
+    }
+
+    /// Sets the Keel gate that records the terminal status of every test.
+    pub(super) fn set_keel_gate(&mut self, gate: Option<Arc<KeelGate>>) {
+        self.keel = gate;
     }
 
     /// Runs the dispatcher to completion, until `resp_rx` is closed.
@@ -800,6 +808,13 @@ where
             }) => {
                 let run_statuses = self.finish_test(test_instance.id(), last_run_status);
                 self.run_stats.on_test_finished(&run_statuses);
+                if let Some(gate) = &self.keel {
+                    gate.on_finished(
+                        &test_instance.suite_info.binary_id,
+                        test_instance.name,
+                        &run_statuses,
+                    );
+                }
 
                 // Check if this run should be cancelled because of a failure.
                 // is_exceeded returns Some(terminate_mode) if max-fail is exceeded.
@@ -858,6 +873,42 @@ where
                     test_instance: test_instance.id(),
                     reason,
                     junit_report_skipped,
+                })
+            }
+            InternalEvent::Executor(ExecutorEvent::Blocked {
+                stress_index,
+                test_instance,
+                blocked_by,
+            }) => {
+                self.rerun_cx.mark_seen(test_instance.id());
+                self.run_stats.blocked += 1;
+                self.run_stats.finished_count += 1;
+                if let Some(gate) = &self.keel {
+                    gate.on_blocked(&test_instance, &blocked_by);
+                }
+                self.callback_none_response(TestEventKind::TestBlocked {
+                    stress_index,
+                    test_instance: test_instance.id(),
+                    blocked_by,
+                    current_stats: self.run_stats,
+                })
+            }
+            InternalEvent::Executor(ExecutorEvent::Cached {
+                stress_index,
+                test_instance,
+                cached_from,
+            }) => {
+                self.rerun_cx.mark_seen(test_instance.id());
+                self.run_stats.cached += 1;
+                self.run_stats.finished_count += 1;
+                if let Some(gate) = &self.keel {
+                    gate.on_cached(&test_instance, &cached_from);
+                }
+                self.callback_none_response(TestEventKind::TestCached {
+                    stress_index,
+                    test_instance: test_instance.id(),
+                    cached_from,
+                    current_stats: self.run_stats,
                 })
             }
             InternalEvent::Signal(event) => self.handle_signal_event(event),
@@ -1109,6 +1160,9 @@ where
             // Forcibly kill child processes in the case of a second shutdown
             // signal.
             self.run_stats.cancel_reason = Some(CancelReason::SecondSignal);
+            if let Some(gate) = &self.keel {
+                gate.cancel();
+            }
             self.basic_callback(TestEventKind::RunBeginKill {
                 setup_scripts_running: self.setup_scripts_running(),
                 current_stats: self.run_stats,
@@ -1117,6 +1171,9 @@ where
             HandleEventResponse::Cancel(event)
         } else if self.run_stats.cancel_reason < Some(reason) {
             self.run_stats.cancel_reason = Some(reason);
+            if let Some(gate) = &self.keel {
+                gate.cancel();
+            }
             self.basic_callback(TestEventKind::RunBeginCancel {
                 setup_scripts_running: self.setup_scripts_running(),
                 current_stats: self.run_stats,

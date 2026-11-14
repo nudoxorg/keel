@@ -5,7 +5,7 @@
 
 use crate::{
     ExpectedError, Result, ReuseBuildKind,
-    cargo_cli::CargoBuildSettings,
+    cargo_cli::{CargoBuildSettings, KeelBuildFlags},
     dispatch::{
         EarlyArgs,
         common::ConfigOpts,
@@ -56,6 +56,7 @@ pub(crate) struct BaseApp {
     pub(crate) reuse_build: ReuseBuildInfo,
     build_scope: BuildScope,
     cargo_settings: CargoBuildSettings,
+    keel_build: Option<KeelBuildFlags>,
     pub(crate) config_opts: ConfigOpts,
     pub(crate) current_version: Version,
 
@@ -167,6 +168,7 @@ impl BaseApp {
             manifest_path,
             build_scope,
             cargo_settings,
+            keel_build: None,
             config_opts,
             cargo_configs,
             current_version,
@@ -174,6 +176,24 @@ impl BaseApp {
             double_spawn: OnceLock::new(),
             target_runner: OnceLock::new(),
         })
+    }
+
+    /// Makes test builds reproducible across checkout paths, as Keel requires.
+    pub(crate) fn with_keel_build(mut self, flags: KeelBuildFlags) -> Self {
+        self.keel_build = Some(flags);
+        self
+    }
+
+    /// Returns the host triple, and the target triple if one was requested.
+    pub(crate) fn keel_triples(&self) -> Vec<String> {
+        let mut triples = vec![self.build_platforms.host.platform.triple_str().to_owned()];
+        if let Some(target) = &self.build_platforms.target {
+            let target = target.triple.platform.triple_str().to_owned();
+            if !triples.contains(&target) {
+                triples.push(target);
+            }
+        }
+        triples
     }
 
     pub(crate) fn load_config(
@@ -449,6 +469,7 @@ impl BaseApp {
             self.manifest_path.as_deref(),
             self.output,
             self.build_platforms.clone(),
+            self.keel_build.as_ref(),
         )?;
 
         Ok((Arc::new(binary_list), BuildKind::Cargo))
@@ -526,7 +547,7 @@ pub(crate) fn current_version() -> Version {
 mod helpers {
     use crate::{
         ExpectedError, Result,
-        cargo_cli::{CargoBuildSettings, CargoCli},
+        cargo_cli::{CargoBuildSettings, CargoCli, KeelBuildFlags},
         dispatch::core::value_enums::CargoMessageFormatOpt,
         output::OutputContext,
     };
@@ -548,6 +569,7 @@ mod helpers {
             manifest_path: Option<&Utf8Path>,
             output: OutputContext,
             build_platforms: BuildPlatforms,
+            keel: Option<&KeelBuildFlags>,
         ) -> Result<BinaryList> {
             // Don't use the manifest path from the graph to ensure that if the user cd's into a
             // particular crate and runs cargo nextest, then it behaves identically to cargo test.
@@ -560,6 +582,9 @@ mod helpers {
                 .add_arg("--no-run")
                 .add_flag_value("--message-format", message_format.cargo_arg());
             cargo_cli.add_options(build_scope, self);
+            if let Some(keel) = keel {
+                cargo_cli.add_keel_flags(keel);
+            }
 
             Self::run_cargo_build(
                 cargo_cli,

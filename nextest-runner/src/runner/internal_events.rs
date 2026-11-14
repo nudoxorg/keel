@@ -131,6 +131,16 @@ pub(super) enum ExecutorEvent<'a> {
         reason: MismatchReason,
         junit_report_skipped: ReportSkipPolicy,
     },
+    Blocked {
+        stress_index: Option<StressIndex>,
+        test_instance: TestInstance<'a>,
+        blocked_by: Vec<String>,
+    },
+    Cached {
+        stress_index: Option<StressIndex>,
+        test_instance: TestInstance<'a>,
+        cached_from: String,
+    },
 }
 
 #[derive(Clone, Copy)]

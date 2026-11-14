@@ -266,6 +266,24 @@ impl<'cfg> MetadataJunit<'cfg> {
                     testsuite.add_test_case(testcase);
                 }
             }
+            TestEventKind::TestBlocked {
+                stress_index,
+                test_instance,
+                blocked_by,
+                ..
+            } => {
+                let message = format!("Blocked: by {}", blocked_by.join(", "));
+                self.add_not_run_test_case(stress_index, test_instance, message);
+            }
+            TestEventKind::TestCached {
+                stress_index,
+                test_instance,
+                cached_from,
+                ..
+            } => {
+                let message = format!("Cached: a pass was stored by run {cached_from}");
+                self.add_not_run_test_case(stress_index, test_instance, message);
+            }
             TestEventKind::RunBeginCancel { .. } | TestEventKind::RunBeginKill { .. } => {}
             TestEventKind::RunFinished {
                 run_id,
@@ -316,6 +334,21 @@ impl<'cfg> MetadataJunit<'cfg> {
         self.test_suites
             .entry(key.clone())
             .or_insert_with(|| TestSuite::new(key.to_string()))
+    }
+
+    fn add_not_run_test_case(
+        &mut self,
+        stress_index: Option<StressIndex>,
+        test_instance: TestInstanceId<'cfg>,
+        message: String,
+    ) {
+        let testsuite = self.testsuite_for_test(stress_index, test_instance);
+        let mut status = TestCaseStatus::skipped();
+        status.set_message(message);
+        let mut testcase = TestCase::new(test_instance.test_name.as_str(), status);
+        testcase.set_classname(test_instance.binary_id.as_str());
+        testcase.set_time(Duration::ZERO);
+        testsuite.add_test_case(testcase);
     }
 
     fn testsuite_for_test(

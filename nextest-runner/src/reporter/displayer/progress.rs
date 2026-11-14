@@ -391,6 +391,17 @@ impl ProgressBarState {
                 self.bar.set_length(current_stats.initial_run_count as u64);
                 self.bar.set_position(current_stats.finished_count as u64);
             }
+            TestEventKind::TestBlocked { current_stats, .. }
+            | TestEventKind::TestCached { current_stats, .. } => {
+                self.stats = *current_stats;
+                self.bar.set_prefix(progress_bar_prefix(
+                    current_stats,
+                    current_stats.cancel_reason,
+                    styles,
+                ));
+                self.bar.set_length(current_stats.initial_run_count as u64);
+                self.bar.set_position(current_stats.finished_count as u64);
+            }
             TestEventKind::TestAttemptFailedWillRetry {
                 test_instance,
                 delay_before_next_attempt,
@@ -545,6 +556,8 @@ pub(super) fn terminal_progress_value(event: &TestEvent<'_>) -> TermProgress {
         | TestEventKind::TestAttemptFailedWillRetry { .. }
         | TestEventKind::TestRetryStarted { .. }
         | TestEventKind::TestSkipped { .. }
+        | TestEventKind::TestBlocked { .. }
+        | TestEventKind::TestCached { .. }
         | TestEventKind::InfoStarted { .. }
         | TestEventKind::InfoResponse { .. }
         | TestEventKind::InfoFinished { .. }
@@ -624,6 +637,8 @@ pub(super) fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut
         leaky_failed,
         exec_failed,
         skipped,
+        blocked,
+        cached,
         cancel_reason: _,
     } = run_stats;
 
@@ -703,6 +718,24 @@ pub(super) fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut
         skipped.style(styles.count),
         "skipped".style(styles.skip),
     );
+
+    if blocked > 0 {
+        swrite!(
+            out,
+            ", {} {}",
+            blocked.style(styles.count),
+            "blocked".style(styles.skip),
+        );
+    }
+
+    if cached > 0 {
+        swrite!(
+            out,
+            ", {} {}",
+            cached.style(styles.count),
+            "cached".style(styles.pass),
+        );
+    }
 }
 
 fn progress_bar_cancel_prefix(reason: Option<CancelReason>, styles: &Styles) -> String {

@@ -3464,6 +3464,238 @@ mod self_update_errors {
 #[cfg(feature = "self-update")]
 pub use self_update_errors::*;
 
+/// An error that occurred while computing the code key of a test binary.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CodeKeyError {
+    /// The executable key of a test binary could not be computed.
+    #[error("compute the executable key of `{path}`; rebuild the test binary and try again")]
+    Executable {
+        /// The test binary.
+        path: Utf8PathBuf,
+
+        /// The underlying error.
+        #[source]
+        error: keel::ExecutableKeyError,
+    },
+
+    /// A code keyer other than the executable keyer failed.
+    #[error("analyze `{path}`: {message}")]
+    Analysis {
+        /// The test binary.
+        path: Utf8PathBuf,
+
+        /// A description of what went wrong, including what to do about it.
+        message: String,
+    },
+}
+
+/// An error that occurred while configuring, planning or reporting a Keel run.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum KeelError {
+    /// The Keel config file could not be read.
+    #[error(
+        "read the Keel config at `{path}`; create it, or pass an existing file with --keel-config"
+    )]
+    ConfigRead {
+        /// The config path.
+        path: Utf8PathBuf,
+
+        /// The underlying error.
+        #[source]
+        error: std::io::Error,
+    },
+
+    /// The Keel config file could not be parsed.
+    #[error("parse the Keel config at `{path}`")]
+    ConfigParse {
+        /// The config path.
+        path: Utf8PathBuf,
+
+        /// The underlying error.
+        #[source]
+        error: toml::de::Error,
+    },
+
+    /// The Keel config uses a schema this build does not understand.
+    #[error(
+        "the Keel config at `{path}` declares schema {found}, but this build of nextest supports \
+         schema {supported}; set `schema = {supported}`"
+    )]
+    ConfigSchema {
+        /// The config path.
+        path: Utf8PathBuf,
+
+        /// The schema in the file.
+        found: u32,
+
+        /// The schema this build supports.
+        supported: u32,
+    },
+
+    /// A filterset in the Keel config did not parse.
+    #[error(
+        "parse the filterset `{filter}` in `{section}` of the Keel config at `{path}`: {reason}"
+    )]
+    ConfigFilterset {
+        /// The config path.
+        path: Utf8PathBuf,
+
+        /// The section the filterset is in.
+        section: String,
+
+        /// The filterset text.
+        filter: String,
+
+        /// What is wrong with the filterset.
+        reason: String,
+    },
+
+    /// An entry in the Keel config is invalid.
+    #[error("`{value}` in `{section}` of the Keel config at `{path}` is invalid: {reason}")]
+    ConfigEntry {
+        /// The config path.
+        path: Utf8PathBuf,
+
+        /// The section the entry is in.
+        section: String,
+
+        /// The entry text.
+        value: String,
+
+        /// Why the entry is invalid.
+        reason: String,
+    },
+
+    /// The code key of a test binary could not be computed.
+    #[error("key the test binary `{binary_id}`")]
+    CodeKey {
+        /// The binary ID.
+        binary_id: RustBinaryId,
+
+        /// The underlying error.
+        #[source]
+        error: CodeKeyError,
+    },
+
+    /// The declarations in a test binary could not be read.
+    #[error("read the Keel declarations in the test binary `{binary_id}`")]
+    Declarations {
+        /// The binary ID.
+        binary_id: RustBinaryId,
+
+        /// The underlying error.
+        #[source]
+        error: keel_decl::ReadError,
+    },
+
+    /// A declaration on a test is invalid.
+    #[error(
+        "use the declaration `{entry}` on `{test}`: {reason}; fix the `stands_on` or `joins` \
+         attribute on the test"
+    )]
+    DeclarationEntry {
+        /// The test the declaration is on.
+        test: String,
+
+        /// The declaration entry.
+        entry: String,
+
+        /// Why the entry is invalid.
+        reason: String,
+    },
+
+    /// The declared runtime files of a package could not be hashed.
+    #[error("hash the declared input files of package `{package}`")]
+    Files {
+        /// The package name.
+        package: String,
+
+        /// The underlying error.
+        #[source]
+        error: keel::FilesError,
+    },
+
+    /// A declared tool is not on `PATH`.
+    #[error(
+        "find the tool `{tool}` declared for `{test}` on PATH; install it, or remove it from \
+         `tools` in the Keel config"
+    )]
+    ToolNotFound {
+        /// The test that declared the tool.
+        test: String,
+
+        /// The tool name.
+        tool: String,
+    },
+
+    /// A declared tool could not be read.
+    #[error("read the tool `{tool}` at `{path}`")]
+    ToolRead {
+        /// The tool name.
+        tool: String,
+
+        /// The resolved path.
+        path: PathBuf,
+
+        /// The underlying error.
+        #[source]
+        error: std::io::Error,
+    },
+
+    /// The key of a test could not be computed.
+    #[error("compute the key of `{test}`")]
+    Key {
+        /// The test.
+        test: String,
+
+        /// The underlying error.
+        #[source]
+        error: keel::KeyError,
+    },
+
+    /// The hierarchy of tests is invalid.
+    #[error("build the test hierarchy")]
+    Plan(#[source] keel::PlanError),
+
+    /// The result store failed.
+    #[error("use the Keel result store")]
+    Store(#[source] keel::StoreError),
+
+    /// `rustc -vV` could not be run or understood.
+    #[error("query the compiler version with `rustc -vV`: {message}")]
+    Rustc {
+        /// What went wrong.
+        message: String,
+    },
+
+    /// The Keel report could not be written.
+    #[error("write the Keel report to `{path}`")]
+    ReportWrite {
+        /// The report path.
+        path: Utf8PathBuf,
+
+        /// The underlying error.
+        #[source]
+        error: std::io::Error,
+    },
+
+    /// The Keel report could not be serialized.
+    #[error("serialize the Keel report")]
+    ReportSerialize(#[source] serde_json::Error),
+
+    /// The requested combination of options is not supported with Keel.
+    #[error("use {option} together with --keel; {hint}")]
+    Unsupported {
+        /// The option that is not supported.
+        option: &'static str,
+
+        /// What to do instead.
+        hint: &'static str,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,6 +29,7 @@ use nextest_runner::{
     errors::DisplayErrorChain,
     helpers::{ShowTerminalProgress, ThemeCharacters, force_or_new_run_id, plural},
     input::InputHandlerKind,
+    keel::{KeelPlanInputs, KeelRunFacts},
     list::{BinaryList, ListProgressOptions, TestExecuteContext, TestList},
     record::{
         ComputedRerunInfo, PortableRecording, RecordOpts, RecordReader, RecordRetentionPolicy,
@@ -100,6 +101,9 @@ pub(crate) struct RunOpts {
 
     #[clap(flatten)]
     pub(crate) reuse_build: ReuseBuildOpts,
+
+    #[clap(flatten)]
+    pub(crate) keel: super::keel::KeelOpts,
 }
 
 /// Options for the bench command.
@@ -921,6 +925,7 @@ impl App {
         rerun: Option<&RunIdOrRecordingSelector>,
         runner_opts: &TestRunnerOpts,
         reporter_opts: &ReporterOpts,
+        keel: &super::keel::KeelOpts,
         cli_args: Vec<String>,
         output_writer: &mut OutputWriter,
     ) -> Result<()> {
@@ -929,6 +934,8 @@ impl App {
             .base
             .load_config(&pcx, &std::collections::BTreeSet::new())?;
         let profile = self.base.load_profile(&config)?;
+        let keel_setup =
+            keel.load_setup(&self.base, &pcx, runner_opts.stress.condition.is_some())?;
 
         // Construct this here so that errors are reported before the build step.
         let mut structured_reporter = structured::StructuredReporter::new();
@@ -1040,9 +1047,11 @@ impl App {
         // validation is complete.
         let rerun_build_scope = rerun_state.as_ref().map(|s| &s.root_info.build_scope.scope);
         let build_scope = self.base.resolve_build_scope(rerun_build_scope);
+        let build_started = std::time::Instant::now();
         let (binary_list, build_kind) = self
             .base
             .build_binary_list_with_scope("test", build_scope)?;
+        let build_duration = build_started.elapsed();
         let build_platforms = &binary_list.rust_build_meta.build_platforms.clone();
         let double_spawn = self.base.load_double_spawn();
         let target_runner = self.base.load_runner(build_platforms);
@@ -1145,6 +1154,25 @@ impl App {
             runner_builder.set_expected_outstanding(expected);
         }
 
+        let keel_session = match &keel_setup {
+            Some(setup) => {
+                let plan = setup
+                    .plan(&KeelPlanInputs {
+                        test_list: &test_list,
+                        profile: &profile,
+                        graph: self.base.graph(),
+                        workspace_root: &self.base.workspace_root,
+                        build_platforms,
+                        target_runner,
+                    })
+                    .map_err(|err| ExpectedError::KeelError { err })?;
+                let session = setup.start(plan, build_duration);
+                runner_builder.set_keel(session.gate());
+                Some(session)
+            }
+            None => None,
+        };
+
         // Save cli_args for recording before moving them to the runner.
         let cli_args_for_recording = cli_args.clone();
         let runner = runner_builder.build(
@@ -1217,8 +1245,23 @@ impl App {
         }
 
         configure_handle_inheritance(no_capture)?;
+        let keel_run_id = runner.run_id();
+        let keel_started_at = runner.started_at();
+        let run_started = std::time::Instant::now();
         let outcome = runner.try_execute(|event| reporter.report_event(event))?;
+        let run_duration = run_started.elapsed();
         let reporter_stats = reporter.finish();
+
+        if let Some(session) = keel_session {
+            let finish = session
+                .finish(&KeelRunFacts {
+                    run_id: keel_run_id.to_string(),
+                    started_at: keel_started_at,
+                    run_duration,
+                })
+                .map_err(|err| ExpectedError::KeelError { err })?;
+            eprint!("{}", finish.summary);
+        }
 
         let outstanding_not_seen_count = reporter_stats
             .run_finished

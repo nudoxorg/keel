@@ -237,6 +237,11 @@ pub enum ExpectedError {
         command: String,
         exit_code: Option<i32>,
     },
+    #[error("Keel failed")]
+    KeelError {
+        #[source]
+        err: KeelError,
+    },
     #[error("building test runner failed")]
     TestRunnerBuildError {
         #[from]
@@ -628,6 +633,7 @@ impl ExpectedError {
             | Self::ArchiveExtractError { .. }
             | Self::RustBuildMetaParseError { .. }
             | Self::PathMapperConstructError { .. }
+            | Self::KeelError { .. }
             | Self::TestRunnerBuildError { .. }
             | Self::ConfigureHandleInheritanceError { .. }
             | Self::CargoMetadataReadError { .. }
@@ -1093,6 +1099,10 @@ impl ExpectedError {
                 );
 
                 None
+            }
+            Self::KeelError { err } => {
+                error!("failed to {err}");
+                err.source()
             }
             Self::TestRunnerBuildError { err } => {
                 error!("failed to build test runner");

@@ -80,6 +80,13 @@ impl EnvironmentMap {
         }
     }
 
+    /// Iterates over the names and unresolved values of the variables.
+    pub(crate) fn name_values(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.map
+            .values()
+            .map(|var| (var.name.as_str(), var.value.as_str()))
+    }
+
     pub(crate) fn apply_env(&self, command: &mut Command) {
         #[cfg_attr(not(windows), expect(clippy::useless_conversion))]
         let existing_keys: BTreeSet<imp::EnvKey> =

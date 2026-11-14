@@ -311,12 +311,27 @@ pub(crate) struct CargoBuildSettings {
     unstable_flags: Vec<String>,
 }
 
+/// The profiles whose debug info is split into a separate file for Keel. Test
+/// binaries use `test` and `bench`, which inherit from `dev` and `release`.
+const KEEL_PACKED_PROFILES: [&str; 4] = ["test", "dev", "bench", "release"];
+
+/// Build settings that Keel adds to the Cargo invocation.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KeelBuildFlags {
+    /// Path prefixes to remap, and what to remap them to.
+    pub(crate) remaps: Vec<(Utf8PathBuf, &'static str)>,
+
+    /// The target triples to set a linker for, and the linker.
+    pub(crate) linker: Option<(Vec<String>, Utf8PathBuf)>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CargoCli<'a> {
     cargo_path: Utf8PathBuf,
     output: OutputContext,
     command: &'a str,
     args: Vec<Cow<'static, str>>,
+    envs: Vec<(&'static str, String)>,
     stderr_null: bool,
 }
 
@@ -332,6 +347,7 @@ impl<'a> CargoCli<'a> {
             output,
             command,
             args: vec![],
+            envs: vec![],
             stderr_null: false,
         };
         if let Some(manifest_path) = manifest_path {
@@ -487,6 +503,47 @@ impl<'a> CargoCli<'a> {
         self
     }
 
+    /// Adds Cargo options and environment that make test binaries reproducible
+    /// across checkout paths, for Keel's executable keys (DESIGN.md §3.1).
+    ///
+    /// Every remapped prefix is appended to `CARGO_ENCODED_RUSTFLAGS`, starting
+    /// from the existing value of that variable, else of `RUSTFLAGS`, else
+    /// nothing. Cargo ignores `build.rustflags` from config files whenever
+    /// either variable is set, so those config-file flags no longer apply to
+    /// the build.
+    pub(crate) fn add_keel_flags(&mut self, flags: &KeelBuildFlags) -> &mut Self {
+        for profile in KEEL_PACKED_PROFILES {
+            self.add_flag_value(
+                "--config",
+                format!("profile.{profile}.split-debuginfo=\"packed\""),
+            );
+        }
+        if let Some((triples, linker)) = &flags.linker {
+            let linker =
+                serde_json::to_string(linker.as_str()).expect("a string always serializes to JSON");
+            for triple in triples {
+                self.add_flag_value("--config", format!("target.{triple}.linker={linker}"));
+            }
+        }
+
+        let mut rustflags: Vec<String> = match std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+            Ok(encoded) => encoded.split('\x1f').map(str::to_owned).collect(),
+            Err(_) => std::env::var("RUSTFLAGS")
+                .map(|flags| flags.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
+        };
+        rustflags.retain(|flag| !flag.is_empty());
+        for (from, to) in &flags.remaps {
+            rustflags.push(format!("--remap-path-prefix={from}={to}"));
+        }
+        self.add_env("CARGO_ENCODED_RUSTFLAGS", rustflags.join("\x1f"))
+    }
+
+    fn add_env(&mut self, name: &'static str, value: String) -> &mut Self {
+        self.envs.push((name, value));
+        self
+    }
+
     /// Adds an owned argument.
     ///
     /// Do not expose this function outside this module! This is private so that
@@ -516,7 +573,10 @@ impl<'a> CargoCli<'a> {
             .expect("all_args always begins with the cargo path");
         // Ensure that cargo gets picked up from PATH if necessary, by calling as_str
         // rather than as_std_path.
-        let ret = duct::cmd(*program, args);
+        let mut ret = duct::cmd(*program, args);
+        for (name, value) in &self.envs {
+            ret = ret.env(name, value);
+        }
 
         if self.stderr_null {
             ret.stderr_null()

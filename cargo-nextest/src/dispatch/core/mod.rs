@@ -9,6 +9,7 @@
 mod archive;
 mod base;
 mod filter;
+mod keel;
 mod list;
 mod replay;
 mod run;
@@ -19,6 +20,7 @@ mod value_enums;
 pub(crate) use archive::{ArchiveApp, ArchiveOpts};
 pub(crate) use base::{BaseApp, current_version};
 pub(crate) use filter::TestBuildFilter;
+pub(crate) use keel::{KeelCommand, keel_build_flags};
 pub(crate) use list::ListOpts;
 pub(crate) use replay::{ReplayOpts, exec_replay};
 pub(crate) use run::{App, BenchOpts, RunOpts};

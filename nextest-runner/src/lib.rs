@@ -20,6 +20,7 @@ pub mod help_render;
 pub mod helpers;
 pub mod indenter;
 pub mod input;
+pub mod keel;
 pub mod list;
 pub mod output_spec;
 pub mod pager;

@@ -7,8 +7,8 @@ use super::{
     EarlyArgs,
     common::CommonOpts,
     core::{
-        App, ArchiveApp, ArchiveOpts, BaseApp, BenchOpts, ListOpts, ReplayOpts, RunOpts,
-        exec_replay,
+        App, ArchiveApp, ArchiveOpts, BaseApp, BenchOpts, KeelCommand, ListOpts, ReplayOpts,
+        RunOpts, exec_replay,
     },
     helpers::resolve_user_config,
     utility::{DebugCommand, SelfCommand, ShowConfigCommand, StoreCommand},
@@ -142,17 +142,41 @@ impl AppOpts {
                     self.common.manifest_path,
                     output_writer,
                 )?;
+                let base = run_opts.keel.apply_to_base(base)?;
                 let app = App::new(base, run_opts.build_filter)?;
                 app.exec_run(
                     run_opts.no_capture,
                     run_opts.rerun.as_ref(),
                     &run_opts.runner_opts,
                     &run_opts.reporter_opts,
+                    &run_opts.keel,
                     cli_args,
                     output_writer,
                 )?;
                 Ok(0)
             }
+            Command::Keel { command } => match command {
+                KeelCommand::Plan(plan_opts) => {
+                    let base = BaseApp::new(
+                        output,
+                        early_args,
+                        plan_opts.reuse_build,
+                        plan_opts.cargo_options,
+                        self.common.config_opts,
+                        self.common.manifest_path,
+                        output_writer,
+                    )?;
+                    let flags =
+                        super::core::keel_build_flags(&base, plan_opts.keel_linker.as_deref())?;
+                    let base = base.with_keel_build(flags);
+                    let app = App::new(base, plan_opts.build_filter)?;
+                    app.exec_keel_plan(
+                        plan_opts.keel_config.as_deref(),
+                        plan_opts.keel_store.as_deref(),
+                    )?;
+                    Ok(0)
+                }
+            },
             Command::Bench(bench_opts) => {
                 let base = BaseApp::new(
                     output,
@@ -253,6 +277,15 @@ pub(crate) enum Command {
     ///
     /// The archive is a tarball compressed with Zstandard (.tar.zst).
     Archive(Box<ArchiveOpts>),
+    /// Plan and inspect incremental, hierarchical runs with Keel.
+    ///
+    /// Keel keys every test on its inputs, remembers which tests passed, and
+    /// runs a test only when no stored pass exists for its current inputs.
+    /// To run with Keel, pass `--keel` to `cargo nextest run`.
+    Keel {
+        #[clap(subcommand)]
+        command: KeelCommand,
+    },
     /// Show information about nextest's configuration in this workspace.
     ///
     /// This command shows configuration information about nextest, including overrides applied to
@@ -334,12 +367,14 @@ impl NtrOpts {
             self.common.manifest_path,
             output_writer,
         )?;
+        let base = self.run_opts.keel.apply_to_base(base)?;
         let app = App::new(base, self.run_opts.build_filter)?;
         app.exec_run(
             self.run_opts.no_capture,
             self.run_opts.rerun.as_ref(),
             &self.run_opts.runner_opts,
             &self.run_opts.reporter_opts,
+            &self.run_opts.keel,
             cli_args,
             output_writer,
         )?;

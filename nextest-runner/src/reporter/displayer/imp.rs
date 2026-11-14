@@ -1071,6 +1071,26 @@ impl<'a> DisplayReporterImpl<'a> {
                     });
                 }
             }
+            TestEventKind::TestBlocked {
+                stress_index,
+                test_instance,
+                blocked_by,
+                ..
+            } => {
+                if self.status_levels.status_level >= StatusLevel::Skip {
+                    self.write_blocked_line(*stress_index, *test_instance, blocked_by, writer)?;
+                }
+            }
+            TestEventKind::TestCached {
+                stress_index,
+                test_instance,
+                cached_from,
+                ..
+            } => {
+                if self.status_levels.status_level >= StatusLevel::Skip {
+                    self.write_cached_line(*stress_index, *test_instance, cached_from, writer)?;
+                }
+            }
             TestEventKind::RunBeginCancel {
                 setup_scripts_running,
                 current_stats,
@@ -1570,6 +1590,54 @@ impl<'a> DisplayReporterImpl<'a> {
         )?;
 
         Ok(())
+    }
+
+    fn write_blocked_line(
+        &self,
+        stress_index: Option<StressIndex>,
+        test_instance: TestInstanceId<'a>,
+        blocked_by: &[String],
+        writer: &mut dyn WriteStr,
+    ) -> io::Result<()> {
+        write!(writer, "{:>12} ", "BLOCKED".style(self.styles.skip))?;
+        let shown = blocked_by
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = blocked_by.len().saturating_sub(2);
+        let more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        writeln!(
+            writer,
+            "[ by {shown}{more} ] {}",
+            self.display_test_instance(stress_index, TestInstanceCounter::Padded, test_instance)
+        )
+    }
+
+    fn write_cached_line(
+        &self,
+        stress_index: Option<StressIndex>,
+        test_instance: TestInstanceId<'a>,
+        cached_from: &str,
+        writer: &mut dyn WriteStr,
+    ) -> io::Result<()> {
+        write!(writer, "{:>12} ", "CACHED".style(self.styles.pass))?;
+        let short: String = cached_from.chars().take(8).collect();
+        let ellipsis = if cached_from.chars().count() > 8 {
+            "…"
+        } else {
+            ""
+        };
+        writeln!(
+            writer,
+            "[ run {short}{ellipsis} ] {}",
+            self.display_test_instance(stress_index, TestInstanceCounter::Padded, test_instance)
+        )
     }
 
     fn write_setup_script_status_line(
@@ -3611,6 +3679,8 @@ mod tests {
                     leaky_failed: 0,
                     exec_failed: 0,
                     skipped: 0,
+                    blocked: 0,
+                    cached: 0,
                     cancel_reason: None,
                 };
 
@@ -3649,6 +3719,8 @@ mod tests {
                     leaky_failed: 0,
                     exec_failed: 1,
                     skipped: 2,
+                    blocked: 0,
+                    cached: 0,
                     cancel_reason: Some(CancelReason::Signal),
                 };
 
@@ -3740,6 +3812,8 @@ mod tests {
                     leaky_failed: 0,
                     exec_failed: 0,
                     skipped: 0,
+                    blocked: 0,
+                    cached: 0,
                     cancel_reason: None,
                 };
 
@@ -3807,6 +3881,8 @@ mod tests {
                                 leaky_failed: 2,
                                 exec_failed: 1,
                                 skipped: 5,
+                                blocked: 0,
+                                cached: 0,
                                 cancel_reason: None,
                             },
                         },

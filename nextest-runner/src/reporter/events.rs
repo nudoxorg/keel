@@ -327,6 +327,37 @@ pub enum TestEventKind<'a> {
         junit_report_skipped: ReportSkipPolicy,
     },
 
+    /// A test was not run because a test it stands on failed (Keel only).
+    TestBlocked {
+        /// If a stress test is being run, the stress index, starting from 0.
+        stress_index: Option<StressIndex>,
+
+        /// The test instance that was blocked.
+        test_instance: TestInstanceId<'a>,
+
+        /// The IDs of the root failures that block the test.
+        blocked_by: Vec<String>,
+
+        /// Current statistics for number of tests so far.
+        current_stats: RunStats,
+    },
+
+    /// A test was not run because a stored pass exists for its current
+    /// inputs (Keel only).
+    TestCached {
+        /// If a stress test is being run, the stress index, starting from 0.
+        stress_index: Option<StressIndex>,
+
+        /// The test instance that was served from the store.
+        test_instance: TestInstanceId<'a>,
+
+        /// The ID of the run that stored the pass.
+        cached_from: String,
+
+        /// Current statistics for number of tests so far.
+        current_stats: RunStats,
+    },
+
     /// An information request was received.
     InfoStarted {
         /// The number of tasks currently running. This is the same as the
@@ -676,6 +707,16 @@ pub struct RunStats {
 
     /// The number of tests that were skipped.
     pub skipped: usize,
+
+    /// The number of tests that were not run because a test they stand on
+    /// failed (Keel only).
+    #[serde(default)]
+    pub blocked: usize,
+
+    /// The number of tests that were not run because a stored pass exists for
+    /// their current inputs (Keel only).
+    #[serde(default)]
+    pub cached: usize,
 
     /// If the run is cancelled, the reason the cancellation is happening.
     pub cancel_reason: Option<CancelReason>,
