@@ -641,6 +641,7 @@ mod helpers {
             Ok((cargo_cli, message_format.forward_json()))
         }
 
+        #[expect(clippy::too_many_arguments)]
         pub(crate) fn compute_binary_list(
             &self,
             cargo_command: &str,

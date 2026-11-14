@@ -920,6 +920,7 @@ impl App {
         )
     }
 
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn exec_run(
         &self,
         no_capture: bool,

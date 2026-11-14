@@ -41,7 +41,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use swrite::{SWrite, swrite};
 use tracing::{debug, warn};
+
+/// A node, with the symbols its test can reach and the symbols of its own
+/// package that it exercises, if known.
+type PlannedNode = (Node, Option<BTreeSet<u32>>, Option<BTreeSet<u32>>);
 
 /// One test of the plan.
 #[derive(Debug)]
@@ -106,7 +111,7 @@ impl KeelPlan {
             cargo_env_of(inputs.test_list),
         );
 
-        let mut planned: Vec<(Node, Option<BTreeSet<u32>>, Option<BTreeSet<u32>>)> = Vec::new();
+        let mut planned: Vec<PlannedNode> = Vec::new();
         let mut binaries_keyed = 0;
         for suite in inputs.test_list.iter() {
             let selected = selected_tests(suite);
@@ -185,12 +190,13 @@ impl KeelPlan {
             } else {
                 "run"
             };
-            out.push_str(&format!(
+            swrite!(
+                out,
                 "{level:>3} {group} {prefix} {state} {upstream} {id}\n",
                 group = node.group,
                 prefix = &hex[..12.min(hex.len())],
                 id = node.id,
-            ));
+            );
         }
         out
     }
@@ -307,8 +313,6 @@ struct PlanBuilder<'a, 'g> {
     env_keys: HashMap<Vec<String>, Digest>,
     tool_digests: HashMap<String, Digest>,
 }
-
-type PlannedNode = (Node, Option<BTreeSet<u32>>, Option<BTreeSet<u32>>);
 
 impl<'a, 'g> PlanBuilder<'a, 'g> {
     fn new(

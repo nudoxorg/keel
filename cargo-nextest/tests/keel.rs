@@ -25,6 +25,7 @@ use keel::{NodeId, Report, Status};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     fs,
     process::{Command, Output},
     time::{Duration, Instant},
@@ -165,7 +166,7 @@ impl Harness {
         );
         for krate in synth["crates"].as_array().expect("crates") {
             let name = krate["name"].as_str().expect("name");
-            manifest.push_str(&format!("{name} = {{ path = \"../{name}\" }}\n"));
+            writeln!(manifest, "{name} = {{ path = \"../{name}\" }}").expect("write to a string");
         }
         let tail = self.workspace.join("crates/zz-tail");
         fs::create_dir_all(tail.join("src")).expect("create the tail crate");
