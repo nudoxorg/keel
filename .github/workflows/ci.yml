@@ -62,3 +62,28 @@ jobs:
         run: test "$(nix-instantiate --eval --strict -A passed nix/keel/tests.nix)" -gt 0
       - name: Nix model and CLI integration
         run: cargo test --locked -p keel-tree --test cli --test contract
+
+  nextest:
+    name: Nextest fork integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            nextest/target
+          key: ${{ runner.os }}-nextest-${{ hashFiles('nextest/Cargo.lock', 'Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-nextest-
+      - name: Check fork against the current Keel library
+        run: cargo check --manifest-path nextest/Cargo.toml --locked -p nextest-runner --lib
+      - name: Build fork without self-update features
+        run: cargo build --manifest-path nextest/Cargo.toml --locked -p cargo-nextest --bin cargo-nextest --no-default-features
+      - name: Exercise pass, cache and changed failure
+        run: .github/scripts/nextest-smoke.sh "$GITHUB_WORKSPACE/nextest/target/debug/cargo-nextest"

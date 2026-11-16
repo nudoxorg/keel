@@ -52,8 +52,7 @@ struct Row {
     wall: Duration,
 }
 
-/// The milestones that `stages` in the report carries beyond what
-/// `keel::Stages` knows.
+/// The milestones recorded in the report's `stages`.
 #[derive(Clone, Copy, Debug, Default)]
 struct Milestones {
     first_test_ms: Option<u64>,
@@ -79,18 +78,16 @@ const COLD_TAIL_SECONDS: u64 = 8;
 /// How long it sleeps in the other scenarios.
 const TAIL_SECONDS: u64 = 1;
 
-/// Parses a report, taking the milestones out of `stages` first because
-/// `keel::Report` rejects fields it does not know.
+/// Parses the same report type used by Keel's other consumers.
 fn parse_report(text: &str) -> (Report, Milestones) {
-    let mut value: Value = serde_json::from_str(text).expect("report.json is JSON");
-    let mut milestones = Milestones::default();
-    if let Some(stages) = value.get_mut("stages").and_then(Value::as_object_mut) {
-        let mut take = |name: &str| stages.remove(name).and_then(|v| v.as_u64());
-        milestones.first_test_ms = take("first_test_ms");
-        milestones.first_root_ms = take("first_root_ms");
-        milestones.cargo_exit_ms = take("cargo_exit_ms");
-    }
-    let report = serde_json::from_value(value).expect("report.json parses");
+    let report: Report = serde_json::from_str(text).expect("report.json parses directly");
+    let milestones = report
+        .stages
+        .map_or_else(Milestones::default, |stages| Milestones {
+            first_test_ms: stages.first_test_ms,
+            first_root_ms: stages.first_root_ms,
+            cargo_exit_ms: stages.cargo_exit_ms,
+        });
     (report, milestones)
 }
 

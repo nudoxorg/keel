@@ -181,11 +181,16 @@ impl KeelSession {
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
             duration_ms: duration_millis(total),
             budget: None,
-            stages: Some(Stages {
-                stage0_ms: 0,
-                build_ms: timings.cargo_exit_ms.unwrap_or(0),
+            // `build_ms` is required by the report schema. If Cargo's exit was
+            // not observed, omit stage timings rather than inventing zero.
+            stages: timings.cargo_exit_ms.map(|build_ms| Stages {
+                stage0_ms: 0, // This runner does not perform Stage 0.
+                build_ms,
                 key_ms: duration_millis(fin.key_time),
                 run_ms: duration_millis(facts.run_duration),
+                first_test_ms: timings.first_test_ms,
+                first_root_ms: timings.first_root_ms,
+                cargo_exit_ms: timings.cargo_exit_ms,
             }),
             counts: Counts::default(),
             roots: Vec::new(),
@@ -204,7 +209,7 @@ impl KeelSession {
         }
 
         if let Some(path) = &self.options.report_path {
-            write_report(path, &report, &timings)?;
+            write_report(path, &report)?;
         }
         if let Err(error) = self.history.with_executed(executed).write() {
             tracing::warn!("could not update the Keel history: {error}");
@@ -342,34 +347,16 @@ fn revision(workspace_root: &Utf8Path) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-/// Writes the report, with the milestones added to `stages`.
-///
-/// `keel::Stages` has no fields for the milestones, and `keel::Report` rejects
-/// fields it does not know, so they are added to the JSON here.
-fn write_report(path: &Utf8Path, report: &Report, timings: &KeelTimings) -> Result<(), KeelError> {
+/// Writes the same typed report that is returned to the caller.
+fn write_report(path: &Utf8Path, report: &Report) -> Result<(), KeelError> {
     let write_error = |error| KeelError::ReportWrite {
         path: path.to_owned(),
         error,
     };
-    let mut value = serde_json::to_value(report).map_err(KeelError::ReportSerialize)?;
-    if let Some(stages) = value
-        .get_mut("stages")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for (name, milestone) in [
-            ("first_test_ms", timings.first_test_ms),
-            ("first_root_ms", timings.first_root_ms),
-            ("cargo_exit_ms", timings.cargo_exit_ms),
-        ] {
-            if let Some(milestone) = milestone {
-                stages.insert(name.to_owned(), milestone.into());
-            }
-        }
-    }
     if let Some(parent) = path.parent().filter(|parent| !parent.as_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(write_error)?;
     }
-    let json = serde_json::to_vec_pretty(&value).map_err(KeelError::ReportSerialize)?;
+    let json = serde_json::to_vec_pretty(report).map_err(KeelError::ReportSerialize)?;
     std::fs::write(path, json).map_err(write_error)
 }
 

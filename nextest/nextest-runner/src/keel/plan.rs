@@ -612,6 +612,9 @@ impl<'a, 'g> PlanBuilder<'a, 'g> {
         }
         let spec = FileSpec {
             package_dir: Some(package_dir),
+            // No dep-info/runtime-read proof is available here. Keep every
+            // selected file in the key, including Rust sources.
+            compiled_in: BTreeSet::new(),
             globs,
             exclude: Vec::new(),
         };
