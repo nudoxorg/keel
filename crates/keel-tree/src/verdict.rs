@@ -243,16 +243,23 @@ pub fn run_with_checks(res: &Resolution<'_>, table: &TestTable, trees: &[Feature
             if counts.pass + counts.fail + counts.blocked + counts.unknown == 0 { continue; }
             if f.state == "failure" || counts.fail > 0 || counts.blocked > 0 {
                 f.state = "failure";
-                for (node, count) in &failures {
-                    if let Some((_, n)) = f.roots.iter_mut().find(|(name, _)| name == node) { *n += count; }
-                    else { f.roots.push((node.clone(), *count)); }
+                let mut totals = failures;
+                for line in f.lines.iter().filter(|l| !l.repeated && l.tally.fail > 0) {
+                    *totals.entry(line.node.clone()).or_default() += line.tally.fail;
+                }
+                let roots: Vec<String> = totals.keys().filter(|node| {
+                    let Some(n) = res.node_index(node) else { return false; };
+                    !totals.keys().filter_map(|other| res.node_index(other)).any(|m| n != m && res.reaches(n, m, None) && !res.reaches(m, n, None))
+                }).cloned().collect();
+                f.roots = roots.iter().map(|node| (node.clone(), totals[node])).collect();
+                f.above_roots = totals.iter().filter(|(node, _)| !roots.contains(node)).map(|(_, count)| *count).sum();
+                for line in &mut f.lines {
+                    if line.repeated || !totals.contains_key(&line.node) { continue; }
+                    let Some(n) = res.node_index(&line.node) else { continue; };
+                    let under: Vec<String> = roots.iter().filter(|root| res.node_index(root).is_some_and(|m| n != m && res.reaches(n, m, None) && !res.reaches(m, n, None))).cloned().collect();
+                    line.role = Some(if under.is_empty() { Role::Root } else { Role::StandsOnFailing(under) });
                 }
                 for (world, count) in worlds { f.roots.push((format!("world:{world}"), count)); }
-                let all = f.roots.clone();
-                f.roots.retain(|(node, _)| {
-                    let Some(n) = res.node_index(node) else { return true; };
-                    !all.iter().filter_map(|(other, _)| res.node_index(other)).any(|m| n != m && res.reaches(n, m, None) && !res.reaches(m, n, None))
-                });
             } else if counts.unknown > 0 || (f.cone.tests > 0 && f.cone.pass == 0) {
                 f.state = "unknown";
             } else if counts.pass > 0 {
@@ -452,6 +459,12 @@ impl Verdict {
                 for (world, error) in &evidence.failed_worlds {
                     let _ = writeln!(out, "- `{world}`: {error}");
                 }
+            }
+            if out.len() > 59_900 {
+                let mut end = 59_900;
+                while !out.is_char_boundary(end) { end -= 1; }
+                out.truncate(end);
+                out.push_str("\n\nThe remaining details are in the CI log.\n");
             }
             return out;
         }

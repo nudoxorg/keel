@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -44,6 +45,7 @@ jobs:
           cargo test --locked -p backend-keel-harness --test driver --no-run --message-format=json > /tmp/keel-test-artifacts.jsonl
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "driver" and .profile.test) | .executable // empty' /tmp/keel-test-artifacts.jsonl)
           test -n "$test_binary"
+          "$test_binary" --list --ignored | grep -q ": test$"
           group="/sys/fs/cgroup/keel-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sudo mkdir "$group"
           trap 'sudo rmdir "$group"' EXIT

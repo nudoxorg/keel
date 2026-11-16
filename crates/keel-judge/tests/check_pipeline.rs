@@ -60,6 +60,7 @@ fn observed_cases_and_failed_worlds_reach_tree_and_durable_judge_without_inventi
         json!({"id":"two","node":"base","language":"test","daemon":false,"steps":[{"id":"check","kind":"process","binary":"probe"}]}),
     ];
     let case_hash = bytes_hash(root, &serde_json::to_vec(&cases[0]).unwrap());
+    let case_two_hash = bytes_hash(root, &serde_json::to_vec(&cases[1]).unwrap());
     let manifest = root.join("manifest.json");
     fs::write(
         &manifest,
@@ -75,7 +76,7 @@ fn observed_cases_and_failed_worlds_reach_tree_and_durable_judge_without_inventi
         "worlds":[{"name":"base-world","at":null,"from":null},{"name":"leaf-world","at":null,"from":"base-world"}],
         "checks":{"suite":{"checks":[
             {"cell":"one","on":["app"],"run":["keel-case","one"],"expect":{"definitionSha256":case_hash},"world":"leaf-world"},
-            {"cell":"two","on":["base"],"run":["keel-case","two"],"expect":{},"world":"base-world"}]}}}).to_string()).unwrap();
+            {"cell":"two","on":["base"],"run":["keel-case","two"],"expect":{"definitionSha256":case_two_hash},"world":"base-world"}]}}}).to_string()).unwrap();
     let (index, _) = source::load(root, None, false).unwrap();
     let res = Resolution::build_with(&model, &index, root, Some("fixture"));
     let table = TestTable::build(&res, false);
@@ -157,6 +158,24 @@ fn observed_cases_and_failed_worlds_reach_tree_and_durable_judge_without_inventi
     keel_judge::checks::record(&verdict_file, &state).unwrap();
     let summary = keel_judge::checks::latest(&state).unwrap().unwrap();
     assert_eq!((summary.pass, summary.unknown), (1, 1));
+    let failed_report = write_report(
+        root,
+        &json!({"schema":1,"manifest_sha256":manifest_hash,"driver_sha256":driver_hash,"binaries":{"probe":artifact_hash},"cases":[
+        {"id":"one","node":"app","language":"test","status":"fail","steps":[{"id":"check","status":"fail"}]},
+        {"id":"two","node":"base","language":"test","status":"fail","steps":[{"id":"check","status":"fail"}]}]}),
+    );
+    let failed = driver::evaluate(
+        &model,
+        &res,
+        Some(&manifest),
+        Some(&failed_report),
+        Some(&bins),
+        Some(Path::new("/bin/sh")),
+    )
+    .unwrap();
+    let grouped = verdict::run_with_checks(&res, &table, &trees, &result, Some(&failed));
+    assert_eq!(grouped.features[0].roots, vec![("base".to_owned(), 1)]);
+    assert_eq!(grouped.features[0].above_roots, 1);
     let world_hash = &evidence.world_definitions["base-world"];
     let observed_setup = Command::new("/bin/sh")
         .args(["-c", "exit 17"])
