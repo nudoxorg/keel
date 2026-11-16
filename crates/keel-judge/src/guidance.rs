@@ -28,7 +28,8 @@ struct Observation {
     case: String,
     coordinate: String,
     before: String,
-    graph: String,
+    #[serde(default)]
+    graph: Option<String>,
     source: String,
     after: String,
     #[serde(default)]
@@ -66,6 +67,38 @@ fn string<'a>(v: &'a Value, p: &str) -> Option<&'a str> {
     v.pointer(p)?.as_str()
 }
 
+pub(crate) fn normal_path(path: &str) -> bool {
+    !path.is_empty()
+        && !Path::new(path).is_absolute()
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Selected ID is a 64-hex string in the current wire format; older captures
+/// carry 32 integer bytes. A name or opaque coordinate is not an identity.
+pub(crate) fn selected_id(identity: &Value) -> Option<String> {
+    let selected = identity.get("semantic_data")?;
+    if selected.get("kind")?.as_str()? != "selected-symbol-id" {
+        return None;
+    }
+    let value = selected.get("value")?;
+    if let Some(text) = value.as_str() {
+        return (text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| text.to_ascii_lowercase());
+    }
+    let bytes = value.as_array()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut result = String::with_capacity(64);
+    use std::fmt::Write;
+    for value in bytes {
+        write!(&mut result, "{:02x}", u8::try_from(value.as_u64()?).ok()?).ok()?;
+    }
+    Some(result)
+}
+
 pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(manifest_path)?)?;
     let inputs: Inputs = serde_json::from_slice(&std::fs::read(inputs_path)?)?;
@@ -79,12 +112,7 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
         }
     }
     for path in &inputs.changes {
-        let p = Path::new(path);
-        if path.is_empty()
-            || p.is_absolute()
-            || p.components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
+        if !normal_path(path) {
             bail!("changed path must be normalized and project-relative: {path:?}");
         }
     }
@@ -117,10 +145,18 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
         if let Some(o) = observations.remove(&e.case) {
             e.coordinate = o.coordinate.clone();
             let (before, b) = read_json(base, &o.before)?;
-            let (graph, g) = read_json(base, &o.graph)?;
+            let graph = o
+                .graph
+                .as_deref()
+                .map(|path| read_json(base, path))
+                .transpose()?;
             let (source, s) = read_json(base, &o.source)?;
             let (after, a) = read_json(base, &o.after)?;
-            e.captures_blake3 = vec![b, g, s, a];
+            e.captures_blake3.push(b);
+            if let Some((_, hash)) = &graph {
+                e.captures_blake3.push(hash.clone());
+            }
+            e.captures_blake3.extend([s, a]);
             let same_snapshot = string(&before, "/availability") == Some("available")
                 && string(&after, "/availability") == Some("available")
                 && string(&before, "/publication") == Some("populated")
@@ -132,6 +168,10 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                 && string(&before, "/source").is_some()
                 && string(&before, "/source") == string(&after, "/source");
             let project = string(&source, "/identity/project");
+            let graph = graph
+                .as_ref()
+                .map(|(value, _)| value)
+                .unwrap_or(&Value::Null);
             let graph_ok = project.is_some()
                 && graph["records"].as_array().is_some_and(|rows| {
                     rows.iter()
@@ -151,7 +191,10 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
             let source_ok = source["answer"] == "page"
                 && string(&source, "/identity/coordinate") == Some(&o.coordinate)
                 && source["source"]["extent"] == "complete"
-                && source["source"]["lines"].as_array().is_some();
+                && source["source"]["lines"].as_array().is_some()
+                && project.is_some_and(|p| !p.is_empty())
+                && string(&source, "/identity/path")
+                    .is_some_and(|p| normal_path(p) && string(&source, "/source/path") == Some(p));
             if !same_snapshot {
                 e.reasons.push("status snapshots missing or changed".into());
             }
@@ -163,24 +206,28 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                 e.reasons
                     .push("source unavailable, incomplete, or coordinate mismatch".into());
             }
-            if same_snapshot && graph_ok && source_ok {
-                let paths: BTreeSet<_> = graph["records"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| string(r, "/identity/path").map(str::to_owned))
-                    .collect();
-                e.observed_changed_paths = paths.intersection(&changed).cloned().collect();
-                e.observed_changed_declarations = graph["records"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|r| string(r, "/identity/shape") == Some("declaration"))
-                    .filter(|r| string(r, "/identity/path").is_some_and(|p| changed.contains(p)))
-                    .filter_map(|r| string(r, "/identity/coordinate").map(str::to_owned))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
+            if same_snapshot && source_ok {
+                if graph_ok {
+                    let paths: BTreeSet<_> = graph["records"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|r| string(r, "/identity/path").map(str::to_owned))
+                        .collect();
+                    e.observed_changed_paths = paths.intersection(&changed).cloned().collect();
+                    e.observed_changed_declarations = graph["records"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| string(r, "/identity/shape") == Some("declaration"))
+                        .filter(|r| {
+                            string(r, "/identity/path").is_some_and(|p| changed.contains(p))
+                        })
+                        .filter_map(|r| string(r, "/identity/coordinate").map(str::to_owned))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                }
                 if !o.related.is_empty() {
                     let mut pages = Vec::new();
                     for path in &o.related {
@@ -188,13 +235,21 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                         pages.push(page);
                         e.captures_blake3.push(hash);
                     }
-                    let changed_nodes = e.observed_changed_declarations.iter().cloned().collect();
-                    match crate::related::metrics(
-                        &pages,
-                        string(&before, "/revision").unwrap(),
-                        &o.coordinate,
-                        &changed_nodes,
-                    ) {
+                    let seed = selected_id(&source["identity"]);
+                    let result = match seed {
+                        Some(seed) => crate::related::metrics(
+                            &pages,
+                            string(&before, "/revision").unwrap(),
+                            string(&before, "/source").unwrap(),
+                            &o.coordinate,
+                            &seed,
+                            project.unwrap(),
+                            string(&source, "/identity/path").unwrap(),
+                            &changed,
+                        ),
+                        None => Err(anyhow::anyhow!("source lacks an exact selected-symbol ID")),
+                    };
+                    match result {
                         Ok(m) => {
                             e.graph_basis = "source-bound compiler call edges; global relation coverage unavailable";
                             e.related_metrics = Some(m);
@@ -206,9 +261,9 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                         }
                     }
                 }
-                if !e.observed_changed_paths.is_empty() {
+                if graph_ok && !e.observed_changed_paths.is_empty() {
                     e.status = "observed-match";
-                } else {
+                } else if graph_ok {
                     e.reasons
                         .push("no observed changed path; absence is not proof of non-reach".into());
                 }

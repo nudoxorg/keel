@@ -1,0 +1,75 @@
+{
+  "answer": "records",
+  "budget": {
+    "bytes": 1898,
+    "bytesPerToken": 4,
+    "estimatedTokens": 475
+  },
+  "coverage": [
+    {
+      "lane": "exact",
+      "state": "complete"
+    },
+    {
+      "lane": "names",
+      "state": "complete"
+    },
+    {
+      "lane": "graph",
+      "state": "unobserved"
+    },
+    {
+      "lane": "semantic",
+      "state": "complete"
+    }
+  ],
+  "detail": "full",
+  "graph_gap": "Graph relation coverage is not certified by this page; inspect package_profile and search source for additional relations",
+  "more": false,
+  "query": "/workspace/example::semantic::8e4e2a6cee134d0e96499e78e579291930f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+  "readiness": "unknown",
+  "records": [
+    {
+      "identity": {
+        "coordinate": "/workspace/example::external::symbol:153262398b839be93d149613dc28e9acdee9a567b59fd23814b97feb1f45a918::u32",
+        "key": "15326239",
+        "name": "u32",
+        "project": "/workspace/example",
+        "segments": [
+          "u32"
+        ],
+        "semantic_data": {
+          "kind": "selected-symbol-id",
+          "value": "153262398b839be93d149613dc28e9acdee9a567b59fd23814b97feb1f45a918"
+        },
+        "shape": "external",
+        "trail": "project \u203a u32"
+      },
+      "language": "unknown",
+      "state": "ready"
+    },
+    {
+      "identity": {
+        "coordinate": "/workspace/example::semantic::8e4e2a6cee134d0e96499e78e579291930f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+        "key": "4bb55ded",
+        "line": 1,
+        "name": "keel_fanout_target",
+        "path": "src/lib.rs",
+        "project": "/workspace/example",
+        "segments": [
+          "keel_fanout_target"
+        ],
+        "semantic_data": {
+          "kind": "selected-symbol-id",
+          "value": "4bb55dede52b3e6c4fa4eb8e28991b9b534d523f2caedfac63d42cfca9187c77"
+        },
+        "shape": "semantic",
+        "trail": "project \u203a src/lib.rs:1 \u203a keel_fanout_target"
+      },
+      "kind": "function",
+      "language": "rust",
+      "signature": "pub fn keel_fanout_target() -> u32",
+      "state": "ready"
+    }
+  ]
+}

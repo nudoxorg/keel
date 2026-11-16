@@ -18,6 +18,7 @@ pub struct Metrics {
     pub observed_cyclic_components: usize,
     pub max_reverse_shortest_depth: usize,
     pub observed_reachable_changed_nodes: usize,
+    pub unattributed_related_nodes: usize,
 }
 fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v.get(key)
@@ -36,7 +37,11 @@ fn hex(s: &str) -> bool {
 pub fn metrics(
     pages: &[Value],
     source_view: &str,
+    source_object: &str,
     coordinate: &str,
+    source_id: &str,
+    project: &str,
+    source_path: &str,
     changed: &BTreeSet<String>,
 ) -> Result<Metrics> {
     if pages.is_empty() {
@@ -47,6 +52,7 @@ pub fn metrics(
     let mut centers = BTreeSet::new();
     let mut root = None;
     let mut edges = BTreeSet::<(String, String)>::new();
+    let mut rows = Vec::new();
     for page in pages {
         let b = page
             .get("related_basis")
@@ -64,6 +70,9 @@ pub fn metrics(
         let view = text(b, "source_view_root")?;
         if !hex(view) || view != source_view {
             bail!("related view root does not match status");
+        }
+        if text(b, "source_object")? != source_object {
+            bail!("related source object does not match status");
         }
         for k in [
             "source_object",
@@ -110,6 +119,9 @@ pub fn metrics(
             if root.replace(center.to_owned()).is_some() {
                 bail!("duplicate selected root");
             }
+        }
+        if let Some(records) = page["records"].as_array() {
+            rows.extend(records.iter().cloned());
         }
         for edge in page["edges"]
             .as_array()
@@ -164,6 +176,9 @@ pub fn metrics(
     }
     let root =
         root.ok_or_else(|| anyhow::anyhow!("selected coordinate is absent from related centers"))?;
+    if root != format!("symbol:{source_id}") {
+        bail!("related center identity does not match selected source");
+    }
     if labels.len() > 512 || edges.len() > 10000 {
         bail!("captured graph exceeds analysis limit");
     }
@@ -226,9 +241,47 @@ pub fn metrics(
             }
         }
     }
+    // The seed has an independently returned source identity and project.
+    // Other endpoints count only when a related record explicitly attributes
+    // the same selected ID and coordinate to this project and a changed path.
+    // Opaque coordinate text is never parsed to infer project ownership.
+    let mut attributed = BTreeMap::from([(root.clone(), source_path.to_owned())]);
+    for row in rows {
+        if row.pointer("/identity/project").and_then(Value::as_str) != Some(project) {
+            continue;
+        }
+        let Some(id) = crate::guidance::selected_id(&row["identity"]) else {
+            continue;
+        };
+        let id = format!("symbol:{id}");
+        let Some(coordinate) = row.pointer("/identity/coordinate").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(path) = row.pointer("/identity/path").and_then(Value::as_str) else {
+            continue;
+        };
+        if labels.get(&id).is_some_and(|label| label == coordinate)
+            && crate::guidance::normal_path(path)
+        {
+            if attributed
+                .insert(id, path.to_owned())
+                .is_some_and(|old| old != path)
+            {
+                bail!("conflicting related endpoint paths");
+            }
+        }
+    }
     let changed_nodes = reachable
         .iter()
-        .filter(|id| labels.get(*id).is_some_and(|label| changed.contains(label)))
+        .filter(|id| {
+            attributed
+                .get(*id)
+                .is_some_and(|path| changed.contains(path))
+        })
+        .count();
+    let unattributed_related_nodes = labels
+        .keys()
+        .filter(|id| !attributed.contains_key(*id))
         .count();
     let basis = basis.unwrap();
     Ok(Metrics {
@@ -244,5 +297,6 @@ pub fn metrics(
         observed_cyclic_components: cyclic,
         max_reverse_shortest_depth: dist.values().copied().max().unwrap_or(0),
         observed_reachable_changed_nodes: changed_nodes,
+        unattributed_related_nodes,
     })
 }

@@ -1,0 +1,73 @@
+{
+  "answer": "status",
+  "availability": "available",
+  "budget": {
+    "bytes": 1339,
+    "bytesPerToken": 4,
+    "estimatedTokens": 335
+  },
+  "capabilities": {
+    "embedding": "unconfigured",
+    "frontends_ready": 4,
+    "frontends_total": 4,
+    "oracles_ready": 0,
+    "oracles_total": 8,
+    "summary": "frontends 4/4 ready \u00b7 oracles 0/8 ready (optional compiler-backed checkers; 4 installed but not yet ready); counts are global, not project coverage; inspect package-profile for the indexed project \u00b7 6 no-manifest \u00b7 embedding unconfigured (optional vector search; `nudox embedding-setup`)",
+    "unavailable": [
+      {
+        "count": 6,
+        "reason": "no-manifest"
+      }
+    ]
+  },
+  "coverage": [
+    {
+      "lane": "exact",
+      "state": "complete"
+    },
+    {
+      "lane": "names",
+      "state": "complete"
+    },
+    {
+      "lane": "graph",
+      "state": "complete"
+    },
+    {
+      "lane": "semantic",
+      "state": "complete"
+    }
+  ],
+  "detail": "full",
+  "publication": "populated",
+  "readiness": "ready",
+  "revision": "25947fbc612c49164d4c6083fa5886f5de8c16e7b25888b4c09de397f6510aa4",
+  "revision_tag": "25947fbc",
+  "rows": 29,
+  "sequence": 2,
+  "source": "a98a26890e4ceda87d8aff319566d807cf8e3ba77cfac06e7f2950263db5c5c1",
+  "source_selection_scope": {
+    "extensions": [
+      {
+        "excluded_files": 0,
+        "extension": "css",
+        "projects_observed": 1,
+        "projects_unknown": 0
+      },
+      {
+        "excluded_files": 0,
+        "extension": "sql",
+        "projects_observed": 1,
+        "projects_unknown": 0
+      },
+      {
+        "excluded_files": 0,
+        "extension": "vue",
+        "projects_observed": 1,
+        "projects_unknown": 0
+      }
+    ],
+    "project_count": 1
+  },
+  "source_tag": "a98a2689"
+}
