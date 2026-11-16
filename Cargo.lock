@@ -177,6 +177,8 @@ name = "backend-keel-harness"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "keel-judge",
+ "keel-tree",
  "rustix",
  "serde",
  "serde_json",
