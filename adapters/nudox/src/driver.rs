@@ -127,6 +127,16 @@ fn options() -> Result<Options, String> {
         order: paths.remove("--order"),
     })
 }
+fn session_pid(sessions: &BTreeMap<String, NamedSession>, name: &str) -> Result<u32, String> {
+    sessions
+        .get(name)
+        .map(|session| session.process.pid())
+        .ok_or_else(|| "MCP session is not live".into())
+}
+struct NamedSession {
+    process: process::Session,
+    next_id: u64,
+}
 struct World {
     root: PathBuf,
     project: PathBuf,
@@ -136,6 +146,7 @@ struct World {
     daemon: Option<process::Daemon>,
     generation: usize,
     bindings: BTreeMap<String, Value>,
+    sessions: BTreeMap<String, NamedSession>,
 }
 impl World {
     fn new(case: &Case, bins: &Path, root: &Path, serial: usize) -> Result<Self, String> {
@@ -208,6 +219,7 @@ impl World {
             daemon: None,
             generation: 0,
             bindings,
+            sessions: BTreeMap::new(),
         };
         world.files(&case.files, &[])?;
         Ok(world)
@@ -395,6 +407,151 @@ impl World {
         }
         process::run(&mut command, None, deadline, prefix)
     }
+    fn mcp_start(
+        &mut self,
+        step: &Step,
+        prefix: &Path,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        if self.sessions.contains_key(&step.session) || self.sessions.len() >= 8 {
+            return Err("MCP session already live or session limit reached".into());
+        }
+        let deadline = Instant::now() + timeout;
+        let mut command = self.command("backend-mcp");
+        command
+            .arg("--endpoint")
+            .arg(&self.endpoint)
+            .arg("--project")
+            .arg(&self.project);
+        let process = process::Session::spawn(&mut command, prefix)?;
+        self.sessions.insert(
+            step.session.clone(),
+            NamedSession {
+                process,
+                next_id: 1,
+            },
+        );
+        let process = &mut self
+            .sessions
+            .get_mut(&step.session)
+            .ok_or("new MCP session missing")?
+            .process;
+        let request = json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"keel-session-contract","version":"1"}}});
+        write_json(&prefix.with_extension("initialize-request.json"), &request)?;
+        let reply =
+            process.exchange(&request, deadline.saturating_duration_since(Instant::now()))?;
+        write_json(&prefix.with_extension("initialize-reply.json"), &reply)?;
+        if reply.get("result").is_none() || reply.get("error").is_some() {
+            return Err(format!("MCP initialization refused: {reply}"));
+        }
+        let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        write_json(
+            &prefix.with_extension("initialized-notification.json"),
+            &notification,
+        )?;
+        process.exchange(
+            &notification,
+            deadline.saturating_duration_since(Instant::now()),
+        )?;
+        let result =
+            json!({"session":step.session,"pid":process.pid(),"isolation":process.isolation()});
+        write_json(&prefix.with_extension("json"), &result)?;
+        for (name, binding) in &step.bind {
+            self.bindings.insert(name.clone(), binding.value(&result)?);
+        }
+        Ok(result)
+    }
+    fn mcp_call(&mut self, step: &Step, prefix: &Path, timeout: Duration) -> Result<Value, String> {
+        let call = if let Some(call) = &step.call {
+            self.expand_json(call)?
+        } else {
+            json!({"name":step.tool,"arguments":self.expand_json(&step.arguments)?})
+        };
+        if call.as_object().is_none_or(|map| {
+            map.len() != 2
+                || !map
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.is_empty())
+                || !map.get("arguments").is_some_and(Value::is_object)
+        }) {
+            return Err("MCP call must be the exact {name, arguments} object".into());
+        }
+        let session = self
+            .sessions
+            .get_mut(&step.session)
+            .ok_or("MCP session is not live")?;
+        let id = session.next_id;
+        session.next_id = id.checked_add(1).ok_or("MCP request id exhausted")?;
+        let request = json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":call});
+        if serde_json::to_vec(&request)
+            .map_err(|error| error.to_string())?
+            .len()
+            >= 8 * 1024 * 1024
+        {
+            return Err("MCP request exceeds the bounded session frame".into());
+        }
+        write_json(&prefix.with_extension("request.json"), &request)?;
+        let reply = session.process.exchange(&request, timeout)?;
+        write_json(&prefix.with_extension("reply.json"), &reply)?;
+        let result = reply
+            .get("result")
+            .ok_or_else(|| format!("MCP JSON-RPC fault: {reply}"))?;
+        let is_error = match result.get("isError") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err("MCP isError must be a boolean".into()),
+        };
+        if is_error != step.mcp_error {
+            return Err(format!(
+                "MCP isError differs from expected {}: {result}",
+                step.mcp_error
+            ));
+        }
+        let structured = result
+            .get("structuredContent")
+            .ok_or("MCP result lacks structuredContent")?;
+        write_json(&prefix.with_extension("json"), structured)?;
+        self.check(
+            step.expect.as_ref().ok_or("MCP call lacks expectation")?,
+            Some(0),
+            &[],
+            &[],
+            Some(structured),
+        )?;
+        for (name, binding) in &step.bind {
+            self.bindings
+                .insert(name.clone(), binding.value(structured)?);
+        }
+        Ok(
+            json!({"session":step.session,"pid":session_pid(&self.sessions, &step.session)?,"request_id":id,"is_error":step.mcp_error}),
+        )
+    }
+    fn mcp_stop(&mut self, step: &Step, prefix: &Path, timeout: Duration) -> Result<Value, String> {
+        let mut named = self
+            .sessions
+            .remove(&step.session)
+            .ok_or("MCP session is not live")?;
+        let pid = named.process.pid();
+        let isolation = named.process.isolation().clone();
+        named.process.finish_with_timeout(timeout)?;
+        let result = json!({"session":step.session,"pid":pid,"isolation":isolation,"reaped":true});
+        write_json(&prefix.with_extension("json"), &result)?;
+        Ok(result)
+    }
+    fn stop_sessions(&mut self) -> Result<(), String> {
+        let mut failures = Vec::new();
+        for (name, mut session) in std::mem::take(&mut self.sessions) {
+            if let Err(error) = session.process.finish_with_timeout(Duration::from_secs(2)) {
+                failures.push(format!("{name}: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
     fn pages(&mut self, step: &Step, prefix: &Path) -> Result<Value, String> {
         let deadline = Instant::now() + Duration::from_secs(step.timeout_seconds);
         let remaining = || deadline.saturating_duration_since(Instant::now());
@@ -567,6 +724,9 @@ impl World {
             return self.pages(step, prefix);
         }
         match step.kind.as_str() {
+            "mcp-start" => return self.mcp_start(step, prefix, timeout),
+            "mcp-call" => return self.mcp_call(step, prefix, timeout),
+            "mcp-stop" => return self.mcp_stop(step, prefix, timeout),
             "write" => {
                 self.files(&step.files, &step.remove)?;
                 return Ok(
@@ -962,7 +1122,7 @@ fn run() -> Result<bool, String> {
             binaries.extend(["backend-locald".to_owned(), "backend-cli".to_owned()]);
         }
         for step in &case.steps {
-            if step.kind == "query" || step.kind == "pages" {
+            if step.kind == "query" || step.kind == "pages" || step.kind == "mcp-start" {
                 binaries.insert("backend-mcp".into());
             }
             if step.kind == "process" {
@@ -1040,6 +1200,12 @@ fn run() -> Result<bool, String> {
                         Ok(detail)=>steps.push(json!({"id":step.id,"status":"pass","duration_ms":start.elapsed().as_millis(),"detail":detail})),
                         Err(error)=>{steps.push(json!({"id":step.id,"status":"fail","duration_ms":start.elapsed().as_millis(),"error":error}));failed=Some(step.id.clone());},
                     }
+                }
+                if !world.sessions.is_empty() && failed.is_none() {
+                    failed = Some("case ended with live MCP sessions".into());
+                }
+                if let Err(error) = world.stop_sessions() {
+                    failed = Some(format!("MCP session cleanup failed: {error}"));
                 }
                 if let Some(mut daemon) = world.daemon.take() {
                     if let Err(error) = daemon.stop() {
