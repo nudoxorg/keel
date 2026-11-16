@@ -1,0 +1,38 @@
+[package]
+name = "keel-store"
+description = "Keel result-store service (axum over the keel filesystem CAS), its gc, and a blocking client implementing keel::store::ResultStore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["server", "client"]
+# The service and gc. The runner needs only `client`
+# (`default-features = false, features = ["client"]`), which keeps tokio and axum out of it.
+server = ["dep:axum", "dep:tokio", "dep:rustix", "dep:clap", "dep:anyhow", "dep:futures-core"]
+client = ["dep:ureq"]
+
+[[bin]]
+name = "keel-store"
+path = "src/main.rs"
+required-features = ["server"]
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+blake3 = { workspace = true }
+clap = { workspace = true, optional = true }
+futures-core = { workspace = true, optional = true }
+keel = { path = "../keel" }
+rustix = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+rand = { workspace = true }

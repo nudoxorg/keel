@@ -1,0 +1,40 @@
+{
+  "origins": [
+    "https://api.example.test",
+    "https://dashboard.example.test",
+    "https://example.test"
+  ],
+  "landing": {
+    "origin": "https://example.test",
+    "pages": [
+      {
+        "path": "/",
+        "links": [
+          "https://api.example.test/v1/downloads/linux-arm64",
+          "https://api.example.test/v1/downloads/linux-x64",
+          "https://api.example.test/v1/downloads/macos",
+          "https://api.example.test/v1/downloads/windows",
+          "https://dashboard.example.test/"
+        ]
+      },
+      {
+        "path": "/404.html",
+        "links": [
+          "https://dashboard.example.test/"
+        ]
+      }
+    ]
+  },
+  "dashboard": {
+    "origin": "https://dashboard.example.test",
+    "pages": [
+      {
+        "path": "/",
+        "links": [
+          "https://example.test/",
+          "https://example.test/legal/"
+        ]
+      }
+    ]
+  }
+}

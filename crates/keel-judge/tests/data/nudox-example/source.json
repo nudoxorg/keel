@@ -1,0 +1,20 @@
+{
+  "answer": "page",
+  "detail": "full",
+  "identity": {
+    "coordinate": "/workspace/example::src/lib.rs:1::entry",
+    "project": "/workspace/example",
+    "path": "src/lib.rs",
+    "shape": "declaration",
+    "name": "entry"
+  },
+  "language": "rust",
+  "source": {
+    "path": "src/lib.rs",
+    "line": 1,
+    "lines": [
+      "fn entry() {}"
+    ],
+    "extent": "complete"
+  }
+}

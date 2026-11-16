@@ -1,0 +1,11 @@
+{
+  "framework": {
+    "revision": "3e0cdee",
+    "path": "ci-vehicle/keel"
+  },
+  "nudox_adapter": {
+    "revision": "73ee0468d8",
+    "path": "tools/keel-harness"
+  },
+  "export": "Tracked framework source and adapter only; private coordination documents, deployment fixtures and live project captures omitted or replaced by explicitly synthetic examples."
+}

@@ -1,0 +1,119 @@
+# HELP keel_judge_info Build information about the running keel-judge; the value is always 1.
+# TYPE keel_judge_info gauge
+keel_judge_info{version="0.1.0"} 1
+# HELP keel_judge_start_time_seconds Unix time at which this keel-judge process started.
+# TYPE keel_judge_start_time_seconds gauge
+keel_judge_start_time_seconds 1763160000
+# HELP keel_judge_metrics_written_timestamp_seconds Unix time at which this file was written; it stops advancing if the supervisor does.
+# TYPE keel_judge_metrics_written_timestamp_seconds gauge
+keel_judge_metrics_written_timestamp_seconds 1763164800.5
+# HELP keel_judge_workers Configured number of workers.
+# TYPE keel_judge_workers gauge
+keel_judge_workers 2
+# HELP keel_judge_workers_busy Workers inside a quantum now.
+# TYPE keel_judge_workers_busy gauge
+keel_judge_workers_busy 1
+# HELP keel_judge_quantum_seconds Configured length of one quantum in seconds.
+# TYPE keel_judge_quantum_seconds gauge
+keel_judge_quantum_seconds 60
+# HELP keel_judge_quanta_total Quanta recorded in the state log, over all restarts.
+# TYPE keel_judge_quanta_total counter
+keel_judge_quanta_total 3
+# HELP keel_judge_fuzz_seconds_total Seconds of fuzzing recorded in the state log, over all restarts.
+# TYPE keel_judge_fuzz_seconds_total counter
+keel_judge_fuzz_seconds_total 170.5
+# HELP keel_judge_execs_total Executions recorded in the state log, over all restarts.
+# TYPE keel_judge_execs_total counter
+keel_judge_execs_total 12000000
+# HELP keel_judge_state_damaged_lines State log lines dropped when this process started.
+# TYPE keel_judge_state_damaged_lines gauge
+keel_judge_state_damaged_lines 0
+# HELP keel_judge_disk_waits_total Times a worker waited for free disk space, since this process started.
+# TYPE keel_judge_disk_waits_total counter
+keel_judge_disk_waits_total 4
+# HELP keel_judge_target_rank Rank of the target: complexity times gap times blast from the fuzz bundle.
+# TYPE keel_judge_target_rank gauge
+keel_judge_target_rank{target="pack-decode"} 9000
+keel_judge_target_rank{target="ref-parse"} 600
+# HELP keel_judge_target_rate Estimated new coverage features per second, as the scheduler computes it.
+# TYPE keel_judge_target_rate gauge
+keel_judge_target_rate{target="pack-decode"} 0.25
+keel_judge_target_rate{target="ref-parse"} 0.015625
+# HELP keel_judge_target_index Scheduling index: rank times rate.
+# TYPE keel_judge_target_index gauge
+keel_judge_target_index{target="pack-decode"} 2250
+keel_judge_target_index{target="ref-parse"} 9.375
+# HELP keel_judge_target_quanta_total Quanta recorded for the target, over all restarts.
+# TYPE keel_judge_target_quanta_total counter
+keel_judge_target_quanta_total{target="pack-decode"} 3
+keel_judge_target_quanta_total{target="ref-parse"} 0
+# HELP keel_judge_target_fuzz_seconds_total Seconds of fuzzing recorded for the target, over all restarts.
+# TYPE keel_judge_target_fuzz_seconds_total counter
+keel_judge_target_fuzz_seconds_total{target="pack-decode"} 170.5
+keel_judge_target_fuzz_seconds_total{target="ref-parse"} 0
+# HELP keel_judge_target_execs_total Executions recorded for the target, over all restarts.
+# TYPE keel_judge_target_execs_total counter
+keel_judge_target_execs_total{target="pack-decode"} 12000000
+keel_judge_target_execs_total{target="ref-parse"} 0
+# HELP keel_judge_target_features Coverage features at the end of the target's newest quantum.
+# TYPE keel_judge_target_features gauge
+keel_judge_target_features{target="pack-decode"} 480
+# HELP keel_judge_target_exec_per_second Executions per second in the target's newest quantum.
+# TYPE keel_judge_target_exec_per_second gauge
+keel_judge_target_exec_per_second{target="pack-decode"} 70000.5
+# HELP keel_judge_target_features_per_hour New features per hour over the target's last four quanta.
+# TYPE keel_judge_target_features_per_hour gauge
+keel_judge_target_features_per_hour{target="pack-decode"} 36
+# HELP keel_judge_target_share Fraction of all recorded fuzz seconds spent on the target.
+# TYPE keel_judge_target_share gauge
+keel_judge_target_share{target="pack-decode"} 1
+keel_judge_target_share{target="ref-parse"} 0
+# HELP keel_judge_target_corpus_files Files in the target's corpus after its newest quantum.
+# TYPE keel_judge_target_corpus_files gauge
+keel_judge_target_corpus_files{target="pack-decode"} 210
+# HELP keel_judge_target_last_quantum_timestamp_seconds Unix time at which the target's newest quantum ended.
+# TYPE keel_judge_target_last_quantum_timestamp_seconds gauge
+keel_judge_target_last_quantum_timestamp_seconds{target="pack-decode"} 1763164790.5
+# HELP keel_judge_target_open_findings Distinct findings recorded for the target; nothing closes one.
+# TYPE keel_judge_target_open_findings gauge
+keel_judge_target_open_findings{target="pack-decode"} 2
+keel_judge_target_open_findings{target="ref-parse"} 0
+# HELP keel_judge_target_blocked 1 while a finding is recorded against the target's current binary, so it is not scheduled.
+# TYPE keel_judge_target_blocked gauge
+keel_judge_target_blocked{target="pack-decode"} 1
+keel_judge_target_blocked{target="ref-parse"} 0
+# HELP keel_judge_target_faulted 1 while the target is backed off: it could not be run, or its last quantum ended in error.
+# TYPE keel_judge_target_faulted gauge
+keel_judge_target_faulted{target="pack-decode"} 0
+keel_judge_target_faulted{target="ref-parse"} 0
+# HELP keel_judge_target_faults_total Faults of the target (could not be run, or a quantum ended in error), since this process started.
+# TYPE keel_judge_target_faults_total counter
+keel_judge_target_faults_total{target="pack-decode"} 0
+keel_judge_target_faults_total{target="ref-parse"} 0
+# HELP keel_judge_target_outcomes_total Quanta of the target by how they ended, over all restarts.
+# TYPE keel_judge_target_outcomes_total counter
+keel_judge_target_outcomes_total{target="pack-decode",outcome="ok"} 2
+keel_judge_target_outcomes_total{target="pack-decode",outcome="crash"} 1
+keel_judge_target_outcomes_total{target="pack-decode",outcome="timeout"} 0
+keel_judge_target_outcomes_total{target="pack-decode",outcome="oom"} 0
+keel_judge_target_outcomes_total{target="pack-decode",outcome="leak"} 0
+keel_judge_target_outcomes_total{target="pack-decode",outcome="error"} 0
+# HELP keel_judge_target_chosen_total Quanta of the target by why it was chosen, over all restarts.
+# TYPE keel_judge_target_chosen_total counter
+keel_judge_target_chosen_total{target="pack-decode",chosen_by="cold"} 1
+keel_judge_target_chosen_total{target="pack-decode",chosen_by="starved"} 0
+keel_judge_target_chosen_total{target="pack-decode",chosen_by="index"} 2
+# HELP keel_judge_findings Distinct findings by target and kind.
+# TYPE keel_judge_findings gauge
+keel_judge_findings{target="pack-decode",kind="rust-panic"} 1
+keel_judge_findings{target="pack-decode",kind="timeout"} 1
+# HELP keel_judge_finding_sightings_total Times findings were seen, by target and kind, repeats included.
+# TYPE keel_judge_finding_sightings_total counter
+keel_judge_finding_sightings_total{target="pack-decode",kind="rust-panic"} 2
+keel_judge_finding_sightings_total{target="pack-decode",kind="timeout"} 1
+# HELP keel_judge_finding_first_seen_timestamp_seconds Unix time at which each distinct finding was first seen.
+# TYPE keel_judge_finding_first_seen_timestamp_seconds gauge
+keel_judge_finding_first_seen_timestamp_seconds{target="pack-decode",kind="rust-panic",key="3fa9c1"} 1763164000.25
+# HELP keel_judge_findings_unparsed_time Findings left out of the first-seen series because their recorded time does not parse.
+# TYPE keel_judge_findings_unparsed_time gauge
+keel_judge_findings_unparsed_time 1

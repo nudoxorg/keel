@@ -1,0 +1,15 @@
+[package]
+name = "synth-workspace"
+description = "Deterministic generator of synthetic Cargo workspaces and single-change mutations for the Keel benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

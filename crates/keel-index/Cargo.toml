@@ -1,0 +1,31 @@
+[package]
+name = "keel-index"
+description = "Compiler-free code index: functions, tests, owning packages, complexity, and which of them a git diff touched"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "keel-index"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+rayon = { workspace = true }
+roaring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+syn = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Integration contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-rust-
+      - name: Compile standalone workspace
+        run: cargo check --locked --workspace --bins --lib
+      - name: Process custody and failure propagation
+        run: cargo test --locked -p backend-keel-harness --test driver
+      - name: Delegated cgroup contains a new session
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p backend-keel-harness --test driver --no-run --message-format=json > /tmp/keel-test-artifacts.jsonl
+          test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "driver" and .profile.test) | .executable // empty' /tmp/keel-test-artifacts.jsonl)
+          test -n "$test_binary"
+          group="/sys/fs/cgroup/keel-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir "$group"
+          trap 'sudo rmdir "$group"' EXIT
+          sudo env KEEL_CGROUP_ROOT="$group" KEEL_REQUIRE_CGROUP=1 KEEL_TEST_SETSID="$(command -v setsid)" "$test_binary" --ignored --test-threads=1
+      - name: Source-bound guidance
+        run: cargo test --locked -p keel-judge --test guidance
+      - name: Check driver admission
+        run: cargo test --locked -p keel-tree --test driver_process
+      - name: Receipt to tree and durable judge pipeline
+        run: cargo test --locked -p keel-judge --test check_pipeline
+      - name: Pure Nix model laws
+        run: test "$(nix-instantiate --eval --strict -A passed nix/keel/tests.nix)" -gt 0
+      - name: Nix model and CLI integration
+        run: cargo test --locked -p keel-tree --test cli --test contract

@@ -1,0 +1,14 @@
+[package]
+name = "keel-order"
+description = "The rule that decides what a test runner starts next: fault mass detected per second, with set-up costs shared within a group"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No dependencies, on purpose: the nextest fork links this crate into the executor,
+# which must not gain a transitive dependency for an ordering rule.
+[dependencies]
+
+[dev-dependencies]

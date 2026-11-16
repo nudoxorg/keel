@@ -1,0 +1,24 @@
+[package]
+name = "keel-cli"
+description = "The `keel` command: Stage 0 planning, interaction coverage, budgets, refresh, audit and PR comments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "keel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+globset = { workspace = true }
+humantime = { workspace = true }
+keel = { path = "../keel" }
+keel-store = { path = "../keel-store", default-features = false, features = ["client"] }
+ra-ap-rustc_lexer = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

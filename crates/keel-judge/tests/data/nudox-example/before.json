@@ -1,0 +1,16 @@
+{
+  "answer": "status",
+  "detail": "full",
+  "availability": "available",
+  "publication": "populated",
+  "revision": "abababababababababababababababababababababababababababababababab",
+  "source": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "sequence": 1,
+  "readiness": "partial",
+  "coverage": [
+    {
+      "lane": "graph",
+      "state": "complete"
+    }
+  ]
+}

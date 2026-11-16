@@ -1,0 +1,58 @@
+# keel-fuzz: Keel's fuzzing component. The engine is LibAFL used as a library; the
+# target contract is the libFuzzer ABI. This crate is excluded from the root
+# workspace (it pulls the whole LibAFL tree and its own C build) and therefore
+# carries explicit versions and its own Cargo.lock.
+[package]
+name = "keel-fuzz"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Gate-mode replay and idle-mode exploration of libFuzzer-ABI targets, built on LibAFL"
+build = "build.rs"
+
+[lib]
+name = "keel_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "keel-fuzz"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+humantime = "2"
+libc = "0.2"
+object = { version = "0.37", default-features = false, features = ["read", "std"] }
+rustc-demangle = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# The engine. Pinned exactly: LibAFL changes API in every minor release.
+libafl = { version = "=0.16.1", default-features = false, features = [
+  "std", "derive", "fork", "rand_trait", "serdeany_autoreg", "errors_backtrace",
+] }
+libafl_bolts = { version = "=0.16.1", default-features = false, features = [
+  "std", "derive", "rand_trait", "serdeany_autoreg", "errors_backtrace",
+] }
+# SanitizerCoverage runtime: counters, PC table, compare tracing (cmplog, value
+# profile). Without the `libfuzzer` feature it does not demand a linked-in
+# LLVMFuzzerTestOneInput; the target is dlopened instead.
+libafl_targets = { version = "=0.16.1", default-features = false, features = [
+  "std", "common", "sancov_cmplog", "sancov_value_profile",
+  "observers", "sanitizers_flags", "cmplog",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+debug = 1
+opt-level = 3
+
+[workspace]
