@@ -466,6 +466,11 @@ impl Session {
             {
                 Ok(Ok(value)) => {
                     if let Some(id) = value.get("id") {
+                        if value.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0")
+                            || value.get("result").is_some() == value.get("error").is_some()
+                        {
+                            return self.fail("invalid JSON-RPC response envelope".into());
+                        }
                         if *id != expected {
                             let description = if self.seen_ids.contains(&id.to_string()) {
                                 "duplicate"

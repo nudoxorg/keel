@@ -609,6 +609,9 @@ while IFS= read -r line; do
     *'"marker":"untouched"'*'"name":"next"'*)
       if [ -f changed ]; then changed=true; else changed=false; fi
       printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":false,"structuredContent":{"pid":%s,"changed":%s}}}\n' "$id" "$$" "$changed" ;;
+    *'"name":"bad-version"'*) printf '{"jsonrpc":"1.0","id":%s,"result":{"isError":false,"structuredContent":{"pid":0}}}\n' "$id" ;;
+    *'"name":"both-result-error"'*) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-1},"result":{"isError":false,"structuredContent":{"pid":0}}}\n' "$id" ;;
+    *'"name":"neither-result-error"'*) printf '{"jsonrpc":"2.0","id":%s}\n' "$id" ;;
     *'"name":"hang"'*) sleep 20 ;;
     *'"name":"refuse"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":true,"structuredContent":{"slug":"cursor-mismatch"}}}\n' "$id" ;;
     *) printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":false,"structuredContent":{"pid":%s}}}\n' "$id" "$$" ;;
@@ -639,7 +642,15 @@ done
         {"id":"hang","kind":"mcp-call","session":"client","tool":"hang","arguments":{},"timeout_seconds":1,"expect":{"exit":0,"json":[{"pointer":"/pid","equals":0}]}},
         {"id":"close","kind":"mcp-stop","session":"client"}
     ]});
-    let result = world.invoke(&manifest(vec![case, failure, hung]), &[]);
+    let mut cases = vec![case, failure, hung];
+    for name in ["bad-version", "both-result-error", "neither-result-error"] {
+        cases.push(json!({"id":name,"language":"protocol","daemon":false,"steps":[
+            {"id":"open","kind":"mcp-start","session":"client"},
+            {"id":"malformed","kind":"mcp-call","session":"client","tool":name,"arguments":{},"expect":{"exit":0,"json":[{"pointer":"/pid","equals":0}]}},
+            {"id":"close","kind":"mcp-stop","session":"client"}
+        ]}));
+    }
+    let result = world.invoke(&manifest(cases), &[]);
     assert_eq!(
         result.status.code(),
         Some(1),
@@ -657,6 +668,16 @@ done
             .expect("timeout error")
             .contains("timed out")
     );
+    for case in &report["cases"].as_array().expect("cases")[3..] {
+        assert_eq!(case["status"], "fail");
+        assert!(
+            case["steps"][1]["error"]
+                .as_str()
+                .expect("envelope error")
+                .contains("invalid JSON-RPC response envelope")
+        );
+        assert_eq!(case["steps"][2]["status"], "blocked");
+    }
     let steps = report["cases"][0]["steps"].as_array().expect("steps");
     let first = steps[0]["detail"]["pid"].as_u64().expect("first pid");
     let second = steps[7]["detail"]["pid"].as_u64().expect("second pid");
@@ -664,7 +685,14 @@ done
     assert_ne!(first, second, "restarting creates a new process");
     assert_eq!(steps[6]["detail"]["reaped"], true);
     assert_eq!(steps[9]["detail"]["reaped"], true);
-    for case in ["session-history", "session-failure", "session-timeout"] {
+    for case in [
+        "session-history",
+        "session-failure",
+        "session-timeout",
+        "bad-version",
+        "both-result-error",
+        "neither-result-error",
+    ] {
         let pids = fs::read_to_string(
             world
                 .0
@@ -693,6 +721,9 @@ done
     for steps in [
         json!([{"id":"call","kind":"mcp-call","session":"missing","tool":"x","arguments":{},"expect":{"exit":0,"json":[{"pointer":"/x","equals":1}]}}]),
         json!([{"id":"stop","kind":"mcp-stop","session":"missing"}]),
+        json!([{"id":"misleading","kind":"process","binary":"probe","session":"s","args":["-c","true"],"expect":{"exit":0,"stdout_contains":["x"]}}]),
+        json!([{"id":"open","kind":"mcp-start","session":"s","tool":"ignored"},{"id":"stop","kind":"mcp-stop","session":"s"}]),
+        json!([{"id":"open","kind":"mcp-start","session":"s"},{"id":"stop","kind":"mcp-stop","session":"s","arguments":{"limit":1}}]),
         json!([{"id":"open","kind":"mcp-start","session":"s"},{"id":"bad","kind":"mcp-call","session":"s","call":{"name":"next","arguments":{}},"arguments":{"limit":5},"expect":{"exit":0,"json":[{"pointer":"/x","equals":1}]}},{"id":"close","kind":"mcp-stop","session":"s"}]),
         json!([{"id":"open","kind":"mcp-start","session":"s"}]),
         json!([{"id":"open","kind":"mcp-start","session":"s"},{"id":"again","kind":"mcp-start","session":"s"},{"id":"close","kind":"mcp-stop","session":"s"}]),

@@ -249,6 +249,31 @@ impl Manifest {
             let mut steps = BTreeSet::new();
             let mut sessions = BTreeSet::new();
             for step in &case.steps {
+                let is_session =
+                    matches!(step.kind.as_str(), "mcp-start" | "mcp-call" | "mcp-stop");
+                if !is_session
+                    && (!step.session.is_empty() || step.call.is_some() || step.mcp_error)
+                {
+                    return Err(format!(
+                        "{}: MCP session fields are only valid for MCP session steps",
+                        step.id
+                    ));
+                }
+                if matches!(step.kind.as_str(), "mcp-start" | "mcp-stop")
+                    && (!step.tool.is_empty()
+                        || step.call.is_some()
+                        || step.mcp_error
+                        || (!step.arguments.is_null()
+                            && !step
+                                .arguments
+                                .as_object()
+                                .is_some_and(serde_json::Map::is_empty)))
+                {
+                    return Err(format!(
+                        "{}: MCP start/stop cannot specify call fields",
+                        step.id
+                    ));
+                }
                 if step.wait_for && step.kind != "query" {
                     return Err(format!(
                         "{}: wait_for is an explicit query-convergence contract",
