@@ -1,0 +1,86 @@
+{
+  "answer": "page",
+  "budget": {
+    "bytes": 1278,
+    "bytesPerToken": 4,
+    "estimatedTokens": 320
+  },
+  "detail": "full",
+  "identity": {
+    "coordinate": "/workspace/example::semantic::32f91616289bdf91d63eeaa3a452aee630f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+    "key": "7febf255",
+    "line": 1,
+    "name": "keel_fanout_target",
+    "path": "src/lib.rs",
+    "project": "/workspace/example",
+    "segments": [
+      "keel_fanout_target"
+    ],
+    "semantic_data": {
+      "kind": "selected-symbol-id",
+      "value": "7febf255dc381881960100d39dd16f66e8de72fd4f4aeaf71219c699196057b6"
+    },
+    "shape": "semantic",
+    "trail": "project \u203a src/lib.rs:1 \u203a keel_fanout_target"
+  },
+  "language": "rust",
+  "signature": "pub fn keel_fanout_target() -> u32",
+  "source": {
+    "extent": "complete",
+    "line": 1,
+    "lines": [
+      "pub fn keel_fanout_target() -> u32 { 7 }"
+    ],
+    "path": "src/lib.rs"
+  },
+  "tokens": [
+    {
+      "kind": "keyword",
+      "text": "pub"
+    },
+    {
+      "kind": "text",
+      "text": " "
+    },
+    {
+      "kind": "keyword",
+      "text": "fn"
+    },
+    {
+      "kind": "text",
+      "text": " "
+    },
+    {
+      "kind": "name",
+      "text": "keel_fanout_target"
+    },
+    {
+      "kind": "punctuation",
+      "text": "("
+    },
+    {
+      "kind": "punctuation",
+      "text": ")"
+    },
+    {
+      "kind": "text",
+      "text": " "
+    },
+    {
+      "kind": "punctuation",
+      "text": "-"
+    },
+    {
+      "kind": "punctuation",
+      "text": ">"
+    },
+    {
+      "kind": "text",
+      "text": " "
+    },
+    {
+      "kind": "type",
+      "text": "u32"
+    }
+  ]
+}

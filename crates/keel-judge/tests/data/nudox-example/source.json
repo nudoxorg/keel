@@ -6,7 +6,11 @@
     "project": "/workspace/example",
     "path": "src/lib.rs",
     "shape": "declaration",
-    "name": "entry"
+    "name": "entry",
+    "semantic_data": {
+      "kind": "selected-symbol-id",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
   },
   "language": "rust",
   "source": {

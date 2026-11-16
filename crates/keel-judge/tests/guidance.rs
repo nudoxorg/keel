@@ -148,7 +148,7 @@ fn source_bound_related_edges_measure_the_observed_diamond_and_cycle() {
     let mut pages = Vec::new();
     for n in 0..4 {
         let page = serde_json::json!({"answer":"records", "more":false, "related_evidence_withheld":false,
-            "related_basis":{"schema":1,"source_view_root":before["revision"],"source_object":"11".repeat(32),"branch":"22".repeat(32),"log":"33".repeat(32),"source_schema":1,"sequence":before["sequence"],"semantic_revision":"44".repeat(32),"neighborhood_root":"55".repeat(32),"center_id":ids[n],"coordinate":labels[n],"relation_coverage":"unknown"},"edges":pairs[n]});
+            "related_basis":{"schema":1,"source_view_root":before["revision"],"source_object":before["source"],"branch":"22".repeat(32),"log":"33".repeat(32),"source_schema":1,"sequence":before["sequence"],"semantic_revision":"44".repeat(32),"neighborhood_root":"55".repeat(32),"center_id":ids[n],"coordinate":labels[n],"relation_coverage":"unknown"},"edges":pairs[n]});
         let name = format!("related{n}.json");
         std::fs::write(tmp.path().join(&name), serde_json::to_vec(&page).unwrap()).unwrap();
         pages.push(name);
@@ -199,4 +199,177 @@ fn source_bound_related_edges_measure_the_observed_diamond_and_cycle() {
     std::fs::write(&path, serde_json::to_vec(&page).unwrap()).unwrap();
     let v: Value = serde_json::from_slice(&run().stdout).unwrap();
     assert_eq!(v["evidence"][0]["status"], "unknown");
+}
+
+#[test]
+fn captured_typed_calls_survive_unobserved_legacy_graph() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/nudox-189f");
+    let output = Command::new(env!("CARGO_BIN_EXE_keel-judge"))
+        .args(["guidance", "--manifest"])
+        .arg(dir.join("manifest.json"))
+        .arg("--inputs")
+        .arg(dir.join("inputs.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["cases"], serde_json::json!(["fanout", "unobserved"]));
+    let e = &v["evidence"][0];
+    assert_eq!(
+        e["status"], "unknown",
+        "legacy graph coverage remains unknown"
+    );
+    assert_eq!(e["observed_changed_declarations"], serde_json::json!([]));
+    assert!(e["blast_radius"].is_null() && e["dependency_complexity"].is_null());
+    let m = &e["related_metrics"];
+    assert_eq!(
+        m["observed_call_edges"], 8,
+        "the ninth observed edge is a type reference"
+    );
+    assert_eq!(m["direct_callers"], 8);
+    assert_eq!(
+        m["observed_reachable_changed_nodes"], 1,
+        "only the independently sourced seed is attributed"
+    );
+    assert_eq!(
+        m["unattributed_related_nodes"], 9,
+        "related rows have no project attribution"
+    );
+}
+
+#[test]
+fn typed_edges_reject_stale_source_and_wrong_seed_identity() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/nudox-189f");
+    let tmp = tempfile::tempdir().unwrap();
+    for name in [
+        "manifest.json",
+        "inputs.json",
+        "before.json",
+        "after-synthetic.json",
+        "graph.json",
+        "source.json",
+        "related.json",
+    ] {
+        std::fs::copy(fixture.join(name), tmp.path().join(name)).unwrap();
+    }
+    let invoke = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_keel-judge"))
+            .args(["guidance", "--manifest"])
+            .arg(tmp.path().join("manifest.json"))
+            .arg("--inputs")
+            .arg(tmp.path().join("inputs.json"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let source_path = tmp.path().join("source.json");
+    let mut source: Value = serde_json::from_slice(&std::fs::read(&source_path).unwrap()).unwrap();
+    source["identity"]["semantic_data"]["value"] = "ab".repeat(32).into();
+    std::fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
+    assert!(invoke()["evidence"][0]["related_metrics"].is_null());
+    std::fs::copy(fixture.join("source.json"), &source_path).unwrap();
+    let after_path = tmp.path().join("after-synthetic.json");
+    let mut after: Value = serde_json::from_slice(&std::fs::read(&after_path).unwrap()).unwrap();
+    after["source"] = "ab".repeat(32).into();
+    std::fs::write(after_path, serde_json::to_vec(&after).unwrap()).unwrap();
+    assert!(invoke()["evidence"][0]["related_metrics"].is_null());
+    std::fs::copy(
+        fixture.join("after-synthetic.json"),
+        tmp.path().join("after-synthetic.json"),
+    )
+    .unwrap();
+    let related_path = tmp.path().join("related.json");
+    let mut related: Value =
+        serde_json::from_slice(&std::fs::read(&related_path).unwrap()).unwrap();
+    related["related_basis"]["source_object"] = "ab".repeat(32).into();
+    std::fs::write(related_path, serde_json::to_vec(&related).unwrap()).unwrap();
+    assert!(invoke()["evidence"][0]["related_metrics"].is_null());
+}
+
+#[test]
+fn changed_endpoint_requires_explicit_matching_project_and_selected_id() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/nudox-189f");
+    let tmp = tempfile::tempdir().unwrap();
+    for name in [
+        "manifest.json",
+        "inputs.json",
+        "before.json",
+        "after-synthetic.json",
+        "graph.json",
+        "source.json",
+        "related.json",
+    ] {
+        std::fs::copy(fixture.join(name), tmp.path().join(name)).unwrap();
+    }
+    let inputs_path = tmp.path().join("inputs.json");
+    let mut inputs: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+    inputs["changes"] = serde_json::json!(["other.rs"]);
+    inputs["observations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("graph");
+    std::fs::write(&inputs_path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+    let related_path = tmp.path().join("related.json");
+    let mut related: Value =
+        serde_json::from_slice(&std::fs::read(&related_path).unwrap()).unwrap();
+    let edge = related["edges"][0].clone();
+    let mut reverse = edge.clone();
+    reverse["from"] = edge["to"].clone();
+    reverse["from_id"] = edge["to_id"].clone();
+    reverse["to"] = edge["from"].clone();
+    reverse["to_id"] = edge["from_id"].clone();
+    related["edges"] = serde_json::json!([reverse]);
+    let id = edge["from_id"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("symbol:")
+        .unwrap();
+    related["records"] = serde_json::json!([{"identity": {"coordinate":edge["from"], "path":"other.rs", "semantic_data":{"kind":"selected-symbol-id","value":id}}}]);
+    let invoke = |page: &Value| {
+        std::fs::write(&related_path, serde_json::to_vec(page).unwrap()).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_keel-judge"))
+            .args(["guidance", "--manifest"])
+            .arg(tmp.path().join("manifest.json"))
+            .arg("--inputs")
+            .arg(&inputs_path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let result = invoke(&related);
+    assert_eq!(
+        result["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        0
+    );
+    related["records"][0]["identity"]["project"] = "/workspace/example".into();
+    let result = invoke(&related);
+    assert_eq!(result["cases"], serde_json::json!(["fanout", "unobserved"]));
+    assert_eq!(
+        result["evidence"][0]["status"], "unknown",
+        "missing legacy graph remains unknown"
+    );
+    assert_eq!(
+        result["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        1
+    );
+    related["records"][0]["identity"]["semantic_data"]["value"] = "ff".repeat(32).into();
+    let result = invoke(&related);
+    assert_eq!(
+        result["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        0
+    );
 }

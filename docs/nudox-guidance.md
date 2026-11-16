@@ -17,7 +17,9 @@ The inputs file is schema 1:
 
 Paths to captures are relative to inputs.json. Capture `backend.status` at
 `detail=full` immediately before and after `backend.graph` and
-`backend.source`, retaining the exact structured JSON responses. Graph pages
+`backend.source`, retaining the exact structured JSON responses. `graph` is
+optional: its absence or incomplete coverage leaves legacy graph facts unknown
+but does not invalidate separately source-bound related observations. Graph pages
 with a continuation are currently unknown; do not discard a continuation and
 claim completeness. Changes must be normalized project-relative paths for the
 same indexed project. Each observed case must be bound by the caller to a
@@ -47,8 +49,8 @@ A case observation may additionally list `related` JSON capture paths. These
 must be full, unwithheld single-page `backend.related` responses with the
 `related_basis` and endpoint IDs introduced by backend commit bfd1c27d94.
 All pages must share the full source basis and semantic revision, match the
-bracketing status view root, and contain the requested case coordinate as a
-center. Paged results are unknown until continuation verification is supported.
+bracketing status view root and source object, and contain the requested case
+coordinate and exact selected source ID as a center. Paged results are unknown until continuation verification is supported.
 Malformed or mismatched related evidence makes that case unknown. Captures are
 hashed in the evidence list after the four original responses.
 
@@ -57,12 +59,17 @@ Distinct edges, direct callers, and reverse reachable callers are lower bounds
 on that captured relation set. SCC count and maximum reverse shortest depth
 describe the **observed subgraph only**: adding edges can change either in both
 directions. The adapter orders cases with observed forward paths to changed
-declarations first. This is a scheduling hint; an absent path proves nothing,
+declarations first. The source seed is attributed by its source response; other
+endpoints count as changed only when their own records explicitly carry the same
+project, selected ID, coordinate and changed path. Missing project attribution is
+reported as `unattributed_related_nodes`, never inferred from opaque coordinate
+text. This is a scheduling hint; an absent path proves nothing,
 case-to-coordinate bindings remain caller supplied, and global complexity,
 blast radius, coverage and confidence remain unknown. The graph analysis has a
 512-node / 10,000-edge bound and refuses larger captures.
 
-The CLI integration tests use independently authored synthetic protocol
-fixtures under `crates/keel-judge/tests/data/nudox-example`. They check the
-adapter's behavior for these response shapes; they are not evidence that a
-running NuDox server has been exercised.
+The CLI tests include independently authored synthetic protocol controls and
+sanitized responses from an official 189f backend fanout run. That run did not
+capture a trailing status: its fixture explicitly substitutes a synthetic copy
+for the second status and does not prove a bracketed real-world observation.
+See the fixture README for provenance.

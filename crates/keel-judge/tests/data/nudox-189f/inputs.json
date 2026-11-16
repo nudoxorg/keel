@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "changes": [
+    "src/lib.rs"
+  ],
+  "observations": [
+    {
+      "case": "fanout",
+      "coordinate": "/workspace/example::semantic::32f91616289bdf91d63eeaa3a452aee630f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+      "before": "before.json",
+      "graph": "graph.json",
+      "source": "source.json",
+      "after": "after-synthetic.json",
+      "related": [
+        "related.json"
+      ]
+    }
+  ]
+}

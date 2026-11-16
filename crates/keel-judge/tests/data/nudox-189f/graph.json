@@ -1,0 +1,75 @@
+{
+  "answer": "records",
+  "budget": {
+    "bytes": 1898,
+    "bytesPerToken": 4,
+    "estimatedTokens": 475
+  },
+  "coverage": [
+    {
+      "lane": "exact",
+      "state": "complete"
+    },
+    {
+      "lane": "names",
+      "state": "complete"
+    },
+    {
+      "lane": "graph",
+      "state": "unobserved"
+    },
+    {
+      "lane": "semantic",
+      "state": "complete"
+    }
+  ],
+  "detail": "full",
+  "graph_gap": "Graph relation coverage is not certified by this page; inspect package_profile and search source for additional relations",
+  "more": false,
+  "query": "/workspace/example::semantic::32f91616289bdf91d63eeaa3a452aee630f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+  "readiness": "unknown",
+  "records": [
+    {
+      "identity": {
+        "coordinate": "/workspace/example::semantic::32f91616289bdf91d63eeaa3a452aee630f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+        "key": "7febf255",
+        "line": 1,
+        "name": "keel_fanout_target",
+        "path": "src/lib.rs",
+        "project": "/workspace/example",
+        "segments": [
+          "keel_fanout_target"
+        ],
+        "semantic_data": {
+          "kind": "selected-symbol-id",
+          "value": "7febf255dc381881960100d39dd16f66e8de72fd4f4aeaf71219c699196057b6"
+        },
+        "shape": "semantic",
+        "trail": "project \u203a src/lib.rs:1 \u203a keel_fanout_target"
+      },
+      "kind": "function",
+      "language": "rust",
+      "signature": "pub fn keel_fanout_target() -> u32",
+      "state": "ready"
+    },
+    {
+      "identity": {
+        "coordinate": "/workspace/example::external::symbol:cd71df50e8b6488c39e45556f24fc4fa3a3ba3ef696967ca4d67b595473bfce9::u32",
+        "key": "cd71df50",
+        "name": "u32",
+        "project": "/workspace/example",
+        "segments": [
+          "u32"
+        ],
+        "semantic_data": {
+          "kind": "selected-symbol-id",
+          "value": "cd71df50e8b6488c39e45556f24fc4fa3a3ba3ef696967ca4d67b595473bfce9"
+        },
+        "shape": "external",
+        "trail": "project \u203a u32"
+      },
+      "language": "unknown",
+      "state": "ready"
+    }
+  ]
+}
