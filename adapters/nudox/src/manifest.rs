@@ -109,20 +109,45 @@ impl Binding {
                         "selected-symbol-key needs the exact selected-symbol-id object".into(),
                     );
                 }
-                let bytes = found["bytes"]
-                    .as_array()
-                    .filter(|b| b.len() == 32)
-                    .ok_or("selected symbol identity must contain32bytes")?;
-                let mut out = String::from("symbol:");
-                for byte in bytes {
-                    use std::fmt::Write;
-                    let byte = byte
-                        .as_u64()
-                        .and_then(|v| u8::try_from(v).ok())
-                        .ok_or("invalid selected symbol byte")?;
-                    write!(&mut out, "{byte:02x}").map_err(|e| e.to_string())?;
-                }
-                Ok(Value::String(out))
+                // Public projections encode the copied selected ID as canonical
+                // hex in `value`; older projections used a 32-byte value array.
+                // Both representations name the same bytes, without hashing.
+                let value = found
+                    .get("value")
+                    .ok_or("selected symbol identity lacks value")?;
+                let hex = if let Some(value) = value.as_str() {
+                    if value.len() != 64
+                        || !value
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                        || value.bytes().all(|b| b == b'0')
+                    {
+                        return Err(
+                            "selected symbol value must be a nonzero canonical 64-hex identity"
+                                .into(),
+                        );
+                    }
+                    value.to_owned()
+                } else {
+                    let bytes = value
+                        .as_array()
+                        .filter(|b| b.len() == 32)
+                        .ok_or("legacy selected symbol value must contain 32 bytes")?;
+                    let mut hex = String::new();
+                    for byte in bytes {
+                        use std::fmt::Write;
+                        let byte = byte
+                            .as_u64()
+                            .and_then(|v| u8::try_from(v).ok())
+                            .ok_or("invalid selected symbol byte")?;
+                        write!(&mut hex, "{byte:02x}").map_err(|e| e.to_string())?;
+                    }
+                    if hex.bytes().all(|b| b == b'0') {
+                        return Err("selected symbol identity is zero".into());
+                    }
+                    hex
+                };
+                Ok(Value::String(format!("symbol:{hex}")))
             }
             Self::Transform { transform, .. } => {
                 Err(format!("unknown identity binding transform {transform}"))
