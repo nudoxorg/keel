@@ -1,0 +1,12 @@
+---
+source: integration-tests/tests/integration/main.rs
+expression: output.stderr_as_str()
+---
+  error: predicate not allowed in `archive-filter` expressions
+   ╭────
+ 1 │ group(serial)
+   ·       ───┬──
+   ·          ╰── group() predicates are not supported while archiving
+   ╰────
+
+error: failed to parse filterset

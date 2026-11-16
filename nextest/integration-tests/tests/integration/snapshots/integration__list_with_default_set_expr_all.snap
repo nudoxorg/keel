@@ -1,0 +1,32 @@
+---
+source: integration-tests/tests/integration/main.rs
+expression: default_filter_stdout(&all_tests_output)
+---
+cdylib-link test_multiply_two
+fixture-project tests::call_dylib_add_two
+fixture-project tests::unit_test_success
+fixture-project::basic test_cwd
+fixture-project::basic test_execute_bin
+fixture-project::basic test_failure_assert
+fixture-project::basic test_failure_error
+fixture-project::basic test_failure_should_panic
+fixture-project::basic test_overrides_wrapper_env
+fixture-project::basic test_result_failure
+fixture-project::basic test_stdin_closed
+fixture-project::basic test_stress_fail_first_iteration
+fixture-project::basic test_subprocess_doesnt_exit
+fixture-project::basic test_subprocess_doesnt_exit_fail
+fixture-project::basic test_subprocess_doesnt_exit_leak_fail
+fixture-project::basic test_success
+fixture-project::basic test_success_should_panic
+fixture-project::other other_test_success
+fixture-project::segfault test_segfault
+fixture-project::bench/my-bench bench_add_two
+fixture-project::bench/my-bench tests::test_execute_bin
+fixture-project::bin/fixture-project tests::bin_success
+fixture-project::bin/other tests::other_bin_success
+fixture-project::example/fixture-project tests::example_success
+fixture-project::example/other tests::other_example_success
+nextest-derive it_works
+with-build-script tests::test_build_script_vars_set
+with-build-script tests::test_out_dir_present

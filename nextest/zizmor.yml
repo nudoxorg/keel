@@ -1,0 +1,5 @@
+rules:
+  # dtolnay/rust-toolchain handles component installation, target addition, and
+  # override configuration beyond what a bare `rustup` invocation provides.
+  superfluous-actions:
+    disable: true

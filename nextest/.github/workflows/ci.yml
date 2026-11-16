@@ -1,0 +1,554 @@
+on:
+  push:
+    branches: [main, auto, canary]
+  pull_request:
+    branches:
+      - main
+
+name: CI
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+env:
+  RUSTFLAGS: -D warnings
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Set temp directory on Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          mkdir -p "D:\a\_temp"
+          echo "TEMP=D:\a\_temp" >> $GITHUB_ENV
+          echo "TMP=D:\a\_temp" >> $GITHUB_ENV
+        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Lint (clippy)
+        run: cargo clippy --all-features --all-targets
+      - name: Lint (rustfmt)
+        run: cargo xfmt --check
+      - name: Generate config schemas
+        run: cargo run --package nextest-runner --features config-schema --bin generate-schemas
+      - name: Install cargo readme
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        with:
+          tool: cargo-readme
+      - name: Run cargo readme
+        run: ./scripts/regenerate-readmes.sh
+      - name: Check for differences
+        run: git diff --exit-code
+
+  build-rustdoc:
+    name: Build documentation
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build rustdoc
+        run: cargo doc --all-features --workspace
+
+  nextest-metadata-msrv:
+    name: Build nextest-metadata on MSRV
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        rust-version: ["1.91"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ matrix.rust-version }}
+      - name: Build nextest-metadata-msrv
+        run: cd fixtures/nextest-metadata-msrv && cargo build
+      # It would be nice to run tests, but it seems hard to do that without some
+      # horrible patching of the various Cargo.toml files. It's also not really
+      # necessary, since we already run tests in the "Test" jobs below.
+
+  build-checks:
+    name: Build checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+        # 1.91 is the MSRV
+        rust-version: ["1.91", stable]
+      fail-fast: false
+    steps:
+      - name: Set temp directory on Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          mkdir -p "D:\a\_temp"
+          echo "TEMP=D:\a\_temp" >> $GITHUB_ENV
+          echo "TMP=D:\a\_temp" >> $GITHUB_ENV
+        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ matrix.rust-version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # This job builds the widest set of feature combinations, so it is the
+          # one that populates the cache. The `test` jobs below restore the same
+          # entry via this key and never write to it.
+          shared-key: build-${{ matrix.rust-version }}
+          # Save only on main -- PR-scoped entries are unrestorable elsewhere
+          # and exhaust the 10 GB free cache tier.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build nextest-metadata
+        run: cargo build --package nextest-metadata
+      - name: Build cargo-nextest without self-update
+        run: cargo build --package cargo-nextest --no-default-features --features default-no-update
+      - name: Build all targets
+        run: cargo build --all-targets
+      - name: Build all targets with all features
+        run: cargo build --all-targets --all-features
+      # Build the default feature set last, so that it is the binary left in
+      # target/debug for the doctests and the upload below. --all-features turns
+      # on experimental-tokio-console, and the RUSTFLAGS env var set for this
+      # workflow overrides build.rustflags from .cargo/config.toml rather than
+      # merging with it, so that build loses `--cfg tokio_unstable` and the
+      # resulting binary panics on startup.
+      - name: Build cargo-nextest
+        run: cargo build --package cargo-nextest
+      # The nextest-metadata doctest shells out to `cargo nextest`, so
+      # cargo-nextest has to be on PATH before the doctests run. Use the binary
+      # built above so the doctest exercises the code under test.
+      - name: Put cargo-nextest on PATH
+        shell: bash
+        run: echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - name: Doctests
+        run: cargo test --doc
+
+      - name: Upload nextest binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-nextest-${{ matrix.os }}-${{ matrix.rust-version }}
+          path: |
+            target/debug/cargo-nextest
+            target/debug/cargo-nextest.exe
+          if-no-files-found: error
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+        # 1.91 is the MSRV
+        rust-version: ["1.91", stable]
+        # Each variant runs the whole suite through a couple of related nextest
+        # entry points: `local` covers the locally built binary in both spawn
+        # modes, and `compat` covers the latest nextest release and without
+        # rustup wrappers. (This could be four variants, but we don't want to
+        # spawn too many jobs.)
+        variant: [local, compat]
+      fail-fast: false
+    steps:
+      - name: Set temp directory on Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          mkdir -p "D:\a\_temp"
+          echo "TEMP=D:\a\_temp" >> $GITHUB_ENV
+          echo "TMP=D:\a\_temp" >> $GITHUB_ENV
+        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ matrix.rust-version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build-${{ matrix.rust-version }}
+          # `build-checks` writes this entry. Saving here as well would race
+          # between the variants and add a multi-minute tail to every job.
+          save-if: "false"
+
+      - name: Install latest nextest release
+        if: ${{ matrix.variant == 'compat' }}
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        with:
+          tool: nextest
+      # Both variants need the locally built binary: `local` runs it directly,
+      # and `compat` runs it through scripts/nextest-without-rustup.sh.
+      - name: Build cargo-nextest
+        run: cargo build --package cargo-nextest
+
+      # Set up recording for the local nextest run.
+      - name: Create recording user config
+        if: ${{ matrix.variant == 'local' }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/nextest-config"
+          printf '[experimental]\nrecord = true\n\n[record]\nenabled = true\n' \
+            > "$RUNNER_TEMP/nextest-config/config.toml"
+          cat "$RUNNER_TEMP/nextest-config/config.toml"
+
+      - name: Test with locally built nextest
+        if: ${{ matrix.variant == 'local' }}
+        shell: bash
+        run: cargo local-nt run --profile ci --user-config-file "$RUNNER_TEMP/nextest-config/config.toml"
+
+      - name: Create portable archive from recorded run
+        # Run this step even if the test step fails.
+        if: ${{ matrix.variant == 'local' && !cancelled() }}
+        shell: bash
+        run: |
+          cargo local-nt store export latest \
+            --user-config-file "$RUNNER_TEMP/nextest-config/config.toml" \
+            --archive-file "$RUNNER_TEMP/nextest-run-${{ matrix.os }}-${{ matrix.rust-version }}.zip"
+
+      - name: Upload recorded run archive
+        # Run this step even if the test step fails.
+        if: ${{ matrix.variant == 'local' && !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/nextest-run-${{ matrix.os }}-${{ matrix.rust-version }}.zip
+          archive: false
+
+      - name: Upload results
+        # Run this step even if the test step fails
+        if: ${{ matrix.variant == 'local' && !cancelled() }}
+        uses: trunk-io/analytics-uploader@817e1a2ec58d888825699ee15ea172809bb3f226 # v2.1.3
+        with:
+          # Path to your test results.
+          junit-paths: target/nextest/ci/junit.xml
+          # Provide your Trunk organization slug.
+          org-slug: nextest-rs
+          # Provide your Trunk API token as a GitHub secret.
+          token: ${{ secrets.TRUNK_API_TOKEN }} # zizmor: ignore[secrets-outside-env]
+        continue-on-error: true
+
+      - name: Copy JUnit report for upload
+        # Run this step even if the test step fails. Copy to a uniquely-named
+        # file so that archive: false (which uses the filename as the artifact
+        # name) produces distinct artifact names across matrix jobs.
+        if: ${{ matrix.variant == 'local' && !cancelled() }}
+        shell: bash
+        run: cp target/nextest/ci/junit.xml "target/nextest/ci/junit-${{ matrix.os }}-${{ matrix.rust-version }}.xml"
+
+      - name: Upload JUnit report
+        # Run this step even if the test step fails. Upload it right now because
+        # we're most interested in the JUnit report generated by the local
+        # version of nextest, not the latest release.
+        if: ${{ matrix.variant == 'local' && !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: target/nextest/ci/junit-${{ matrix.os }}-${{ matrix.rust-version }}.xml
+          archive: false
+          if-no-files-found: error
+
+      # Double-spawn only applies to Unix.
+      - name: Test without double-spawning
+        if: ${{ matrix.variant == 'local' && runner.os != 'Windows' }}
+        env:
+          NEXTEST_DOUBLE_SPAWN: 0
+        run: cargo local-nt run --profile ci
+
+      - name: Test with latest nextest release
+        if: ${{ matrix.variant == 'compat' }}
+        run: cargo nextest run --profile ci
+
+      - name: Test without rustup wrappers
+        if: ${{ matrix.variant == 'compat' }}
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+        shell: bash
+        run: ./scripts/nextest-without-rustup.sh run --profile ci
+
+  test-archive-target-runner:
+    name: Test archives with a target runner
+    # We need at least 24.04 for updated wine and mingw. 22.04 has a wine that's too old (and the
+    # official WineHQ PPA breaks every so often).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install wine and gcc-mingw-w64-x86-64-win32
+        run: |
+          sudo apt-get update
+          sudo apt-get install wine gcc-mingw-w64-x86-64-win32
+      - name: Build cargo-nextest
+        run: cargo build --package cargo-nextest
+      - name: Archive test fixtures
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+        run: |
+          ./scripts/nextest-without-rustup.sh archive --manifest-path fixtures/fixture-project/Cargo.toml \
+            --target x86_64-pc-windows-gnu --archive-file target/fixture-archive.tar.zst \
+            --package cdylib-example --package nextest-derive
+
+      # This ensures that for target binaries, we always use the libdir in the archive, never the
+      # one installed by rustup.
+      - name: Remove x86_64-pc-windows-gnu target from rustup
+        run: rustup target remove x86_64-pc-windows-gnu
+
+      - name: Run test fixtures
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: wine
+        run: cargo local-nt run --archive-file target/fixture-archive.tar.zst
+
+      # Completely uninstall rustup -- this is similar to running an archive on a machine without
+      # cargo.
+      - name: Uninstall rustup
+        run: rustup self uninstall -y
+
+      - name: Run test fixtures without rustup wrappers
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: wine
+          CARGO_NEXTEST: target/debug/cargo-nextest
+        run: ./scripts/nextest-without-rustup.sh run --archive-file target/fixture-archive.tar.zst
+
+      # Upload the archive for use in the next job.
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: target/fixture-archive.tar.zst
+          archive: false
+          if-no-files-found: error
+
+  test-archive-runner-dest:
+    name: Test archives with a runner (destination)
+    strategy:
+      matrix:
+        data:
+          - os: ubuntu-24.04
+            # The artifact name is set by the upload job, which is ubuntu-latest.
+            artifact-name: ubuntu-latest
+          - os: windows-latest
+            artifact-name: windows-latest
+    runs-on: ${{ matrix.data.os }}
+    needs:
+      - test-archive-target-runner
+      # Only the uploaded cargo-nextest binary is needed here, so this is gated
+      # on `build-checks` rather than on the full test matrix.
+      - build-checks
+    steps:
+      - name: Set temp directory on Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          mkdir -p "D:\a\_temp"
+          echo "TEMP=D:\a\_temp" >> $GITHUB_ENV
+          echo "TMP=D:\a\_temp" >> $GITHUB_ENV
+        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download nextest binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cargo-nextest-${{ matrix.data.artifact-name }}-stable
+          path: nextest-bin
+      - name: Download archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fixture-archive.tar.zst
+          path: fixture-archive
+      - name: Run test fixtures (host)
+        if: ${{ matrix.data.artifact-name == 'ubuntu-latest' }}
+        env:
+          CARGO_NEXTEST: nextest-bin/cargo-nextest
+        run: |
+          chmod +x $CARGO_NEXTEST
+          ./scripts/nextest-without-rustup.sh run \
+            --archive-file fixture-archive/fixture-archive.tar.zst \
+            --workspace-remap $GITHUB_WORKSPACE/fixtures/fixture-project \
+            -E 'platform(host)'
+      - name: Run test fixtures (target)
+        if: ${{ matrix.data.artifact-name == 'windows-latest' }}
+        shell: bash
+        env:
+          CARGO_NEXTEST: nextest-bin/cargo-nextest.exe
+        run: |
+          ./scripts/nextest-without-rustup.sh run \
+            --archive-file fixture-archive/fixture-archive.tar.zst \
+            --workspace-remap $GITHUB_WORKSPACE/fixtures/fixture-project \
+            -E 'platform(target)'
+
+  test-build-dir:
+    name: Test with Cargo build-dir
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build cargo-nextest
+        run: cargo build --package cargo-nextest
+      # build.build-dir was stabilized in Cargo 1.91. The new build directory
+      # layout is nightly-only, and as of the 2026-07-30 nightly it is the
+      # default there, so -Zbuild-dir-new-layout is now redundant. It is kept so
+      # these steps stay pinned to the new layout if that default changes. (The
+      # layout was stabilized and then reverted once already, so it might.)
+      #
+      # The legacy layout is covered separately below, via Cargo's temporary
+      # opt-out env var. Once that env var goes away, this job should install a
+      # stable toolchain for those steps instead: build.build-dir itself is
+      # stable, so only the layout needs nightly.
+      - name: Run fixture tests with build-dir
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+          CARGO_BUILD_BUILD_DIR: ${{ github.workspace }}/build-output
+        run: |
+          ./scripts/nextest-without-rustup.sh run \
+            -Z build-dir-new-layout \
+            --manifest-path fixtures/fixture-project/Cargo.toml \
+            --package cdylib-link --package cdylib-example \
+            --package with-build-script
+      # Also exercise dylibs: fixture-project's lib unit test
+      # `tests::call_dylib_add_two` links against the dylib-test package, whose
+      # crate-type is "dylib". That test is the only consumer of a dylib
+      # dependency in the fixture, so this step must keep building it.
+      #
+      # Only --lib is built here because fixture-project's other test targets
+      # contain deliberately-failing tests.
+      #
+      # The steps that build fixture-project clear RUSTFLAGS because this workflow sets
+      # `-D warnings`, and fixture-project's lib deliberately calls a deprecated
+      # function to produce a compiler warning for the --cargo-message-format
+      # tests. The integration test harness clears RUSTFLAGS for the same reason
+      # (see sanitize_env in integration-tests/src/env.rs); the fixture is test
+      # data, not nextest's own code.
+      - name: Run dylib fixture tests with build-dir
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+          RUSTFLAGS: ""
+          CARGO_BUILD_BUILD_DIR: ${{ github.workspace }}/build-output
+        run: |
+          ./scripts/nextest-without-rustup.sh run \
+            -Z build-dir-new-layout \
+            --manifest-path fixtures/fixture-project/Cargo.toml \
+            --package fixture-project --lib
+      # The same dylib test under the new layout without build.build-dir, which
+      # is the configuration nightly users get by default (and the one reported
+      # in #3512).
+      - name: Run dylib fixture tests with the new layout only
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+          RUSTFLAGS: ""
+        run: |
+          ./scripts/nextest-without-rustup.sh run \
+            -Z build-dir-new-layout \
+            --manifest-path fixtures/fixture-project/Cargo.toml \
+            --package fixture-project --lib
+      # And with build.build-dir under the legacy layout, which is what stable
+      # users get today. __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT is
+      # Cargo's own opt-out; see the note above about replacing it with a stable
+      # toolchain once it is removed.
+      - name: Run dylib fixture tests with build-dir under the legacy layout
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+          RUSTFLAGS: ""
+          CARGO_BUILD_BUILD_DIR: ${{ github.workspace }}/build-output-legacy
+          __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: 1
+        run: |
+          ./scripts/nextest-without-rustup.sh run \
+            --manifest-path fixtures/fixture-project/Cargo.toml \
+            --package fixture-project --lib
+      # fixture-project is included here so that the archive has to carry the
+      # dylib-test dylib. Here, dylib-test is not among the selected packages,
+      # so it doesn't enter the set of packages that apply_archive_filters
+      # considers relevant -- but fixture-project's lib test still needs its
+      # dylib at exec time.
+      #
+      # --lib is required here because fixture-project's other test targets
+      # contain deliberately failing tests, and we want this step to succeed.
+      #
+      # RUSTFLAGS is cleared for the deprecation warning in fixture-project's
+      # lib, as in the steps above.
+      - name: Archive fixture tests with build-dir
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          RUSTUP_AVAILABLE: 1
+          RUSTFLAGS: ""
+          CARGO_BUILD_BUILD_DIR: ${{ github.workspace }}/build-output
+        run: |
+          ./scripts/nextest-without-rustup.sh archive \
+            -Z build-dir-new-layout \
+            --manifest-path fixtures/fixture-project/Cargo.toml \
+            --archive-file target/build-dir-archive.tar.zst \
+            --lib \
+            --package cdylib-link --package cdylib-example \
+            --package with-build-script --package fixture-project
+      # Run from the archive without build-dir env to verify archive
+      # portability. (build_directory is normalized to target_directory in the
+      # archive). Wipe both the target and build directories first to ensure
+      # the archive is self-contained.
+      - name: Run from archive without build-dir
+        env:
+          CARGO_NEXTEST: target/debug/cargo-nextest
+          # Do not set RUSTUP_AVAILABLE here, since running tests out of an
+          # archive should not require rustup or Cargo.
+        run: |
+          rm -r fixtures/fixture-project/target \
+            ${{ github.workspace }}/build-output \
+            ${{ github.workspace }}/build-output-legacy
+          ./scripts/nextest-without-rustup.sh run \
+            --archive-file target/build-dir-archive.tar.zst

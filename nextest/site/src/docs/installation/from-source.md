@@ -1,0 +1,66 @@
+---
+icon: material/language-rust
+sidebar_icon: false
+description: Installing cargo-nextest from source with cargo install --locked.
+---
+
+# Installing from source
+
+If pre-built binaries are not available for your platform, or you'd otherwise like to install cargo-nextest from source, here's what you need to do:
+
+## Installing from crates.io
+
+Run the following command:
+
+```
+cargo install cargo-nextest --locked
+```
+
+!!! warning
+
+    A plain `cargo install cargo-nextest` without `--locked` is not supported and **will not work**.
+    
+    <!-- md:version 0.9.124 --> If you attempt to `cargo install` nextest without `--locked`, the build will fail with a message asking you to use `--locked`.
+
+`cargo nextest` must be compiled and installed with **Rust {{ msrv }}** or later (see [_Stability policy_] for more), but it can build and run
+tests against most versions of Rust going back several years.
+
+[_Stability policy_]: ../stability/index.md#minimum-supported-rust-versions
+
+## Using a cached install in CI
+
+Most CI users of nextest will benefit from using cached binaries. Consider using the [pre-built binaries](pre-built-binaries.md) for this purpose.
+
+[See this example for how the nextest repository uses pre-built binaries.](https://github.com/nextest-rs/nextest/blob/0eadcdfa349ff36354de464ecf6002d89ff50fe6/.github/workflows/ci.yml#L124-L125)
+
+If your CI is based on GitHub Actions, you may use the
+[baptiste0928/cargo-install](https://github.com/marketplace/actions/cargo-install) action to build cargo-nextest from source and cache
+the cargo-nextest binary.
+
+```yaml
+jobs:
+  ci:
+    # ...
+    steps:
+      - uses: actions/checkout@v3
+      # Install a Rust toolchain here.
+      - name: Install cargo-nextest
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: cargo-nextest
+          locked: true
+          # Uncomment the following line if you'd like to stay on the 0.9 series
+          # version: 0.9
+      # At this point, cargo-nextest will be available on your PATH
+```
+
+Also consider using the [Swatinem/rust-cache](https://github.com/marketplace/actions/rust-cache)
+action to make your builds faster.
+
+## Installing from GitHub
+
+Install the latest, in-development version of cargo-nextest from the GitHub repository:
+
+```
+cargo install --git https://github.com/nextest-rs/nextest --bin cargo-nextest
+```

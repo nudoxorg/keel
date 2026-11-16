@@ -1,0 +1,25 @@
+{
+    "permissions": {
+        "allow": [
+            "Bash(cargo build:*)",
+            "Bash(cargo check:*)",
+            "Bash(cargo clippy:*)",
+            "Bash(cargo fmt:*)",
+            "Bash(cargo nextest run:*)",
+            "Bash(cargo test:*)",
+            "Bash(cargo xfmt:*)",
+            "Bash(gh issue list:*)",
+            "Bash(gh issue view:*)",
+            "Bash(gh pr view:*)",
+            "Bash(git log:*)",
+            "Bash(git show:*)",
+            "Bash(jj diff:*)",
+            "Bash(jj s:*)",
+            "Bash(jj show:*)",
+            "Skill(prepare-changelog)",
+            "WebSearch"
+        ],
+        "deny": [],
+        "ask": []
+    }
+}

@@ -1,0 +1,9 @@
+---
+source: integration-tests/tests/integration/main.rs
+expression: output.stderr_as_str()
+---
+   Archiving 20 binaries (including 4 non-test binaries), 2 build script output directories, 2 linked paths, 1 extra path, and 1 standard library to <archive-file>
+error: error creating archive `<archive-file>`
+
+Caused by:
+  extra path `<target-dir>/missing-file` not found

@@ -1,0 +1,165 @@
+# adapted from https://github.com/taiki-e/cargo-hack/blob/main/.github/workflows/release.yml
+
+name: Publish test releases to GitHub
+on:
+  push:
+    tags:
+      - "*"
+
+permissions: {}
+
+jobs:
+  internal-test-release:
+    permissions:
+      contents: write
+    environment: release
+    if: github.repository_owner == 'nextest-rs' && startsWith(github.ref_name, 'internal-test-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Note: do not publish this until binaries are built and uploaded below. This is so that
+      # `cargo binstall` keeps working.
+      - uses: taiki-e/create-gh-release-action@eba8ea96c86cca8a37f1b56e94b4d13301fba651 # v1.11.0
+        id: create-gh-release
+        with:
+          prefix: internal-test
+          title: $prefix $version
+          branch: main
+          # Uploads can't be made to immutable releases, so we set this to draft for now.
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      version: ${{ steps.create-gh-release.outputs.version }}
+
+  build-internal-test-binaries:
+    name: Build internal-test binaries for ${{ matrix.target }}
+    permissions:
+      contents: write
+    environment: release-binaries
+    if: github.repository_owner == 'nextest-rs' && startsWith(github.ref_name, 'internal-test-')
+    needs:
+      - internal-test-release
+    strategy:
+      matrix:
+        include:
+          # Native builds
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            build-target: x86_64-pc-windows-msvc
+            build-tool: cargo
+            dry-run: true
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            build-target: i686-pc-windows-msvc
+            build-tool: cargo
+            dry-run: true
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            build-target: aarch64-pc-windows-msvc
+            build-tool: cargo
+            dry-run: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: internal-test
+          # The tag name contains the binary name so just use that.
+          archive: $tag-$target
+          build-tool: ${{ matrix.build-tool }}
+          target: ${{ matrix.build-target }}
+          tar: all
+          zip: windows
+          checksum: b2,sha256
+          # dry-run to not upload the binary to the GitHub release
+          dry-run: ${{ matrix.dry-run }}
+          dry-run-intended: ${{ matrix.dry-run }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_PROFILE_RELEASE_LTO: true
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+
+      - name: Download verpatch on Windows
+        if: endsWith(matrix.target, '-pc-windows-msvc')
+        shell: bash
+        run: |
+          set -x
+          mkdir -p target/unsigned
+          cd target/unsigned
+          cp ../${{ matrix.build-target }}/release/internal-test.exe .
+          curl -LsSfO "https://github.com/nextest-rs/mukti/releases/download/verpatch-1.0.10/verpatch-bin-1.0.10.zip"
+          unzip verpatch-bin-1.0.10.zip
+      - name: Add metadata to Windows binary
+        if: endsWith(matrix.target, '-pc-windows-msvc')
+        shell: powershell
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cd target/unsigned
+          # Extract version from ref_name, e.g. internal-test-0.9.97 -> 0.9.97
+          $refName = $env:REF_NAME
+          if ($refName -match "^internal-test-(.+)$") {
+            $version = $Matches[1]
+          } else {
+            Write-Error "Could not extract version from ref_name: $refName"
+            exit 1
+          }
+          .\verpatch.exe /va .\internal-test.exe `
+            $version /high `
+            /pv $version `
+            /s product "internal-test" `
+            /s "(c)" "(c) The nextest Contributors. License: MIT OR Apache-2.0"
+
+      - name: Upload unsigned Windows artifact
+        id: upload-unsigned-artifact
+        if: endsWith(matrix.target, '-pc-windows-msvc')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}-unsigned
+          path: target/unsigned/internal-test.exe
+      - run: mkdir -p target/signed
+      - name: Submit signing request
+        id: submit-signing-request
+        if: endsWith(matrix.target, '-pc-windows-msvc')
+        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '34634019-2ee0-4162-830a-72cd1a0cb73f'
+          project-slug: 'nextest'
+          signing-policy-slug: 'test-signing'
+          artifact-configuration-slug: 'internal-test'
+          github-artifact-id: '${{ steps.upload-unsigned-artifact.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'target/signed'
+      - name: Archive and upload Windows artifacts
+        id: archive-windows-artifact
+        if: endsWith(matrix.target, '-pc-windows-msvc')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: ./scripts/archive-and-upload-windows.sh internal-test.exe
+      - name: Set archive output variable
+        id: archive-output
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: ./scripts/set-archive-output.sh
+    outputs:
+      x86_64-windows-tar: ${{ steps.archive-output.outputs.x86_64-pc-windows-msvc-tar }}
+      x86_64-windows-zip: ${{ steps.archive-output.outputs.x86_64-pc-windows-msvc-zip }}
+      i686-windows-tar: ${{ steps.archive-output.outputs.i686-pc-windows-msvc-tar }}
+      i686-windows-zip: ${{ steps.archive-output.outputs.i686-pc-windows-msvc-zip }}
+      aarch64-windows-tar: ${{ steps.archive-output.outputs.aarch64-pc-windows-msvc-tar }}
+      aarch64-windows-zip: ${{ steps.archive-output.outputs.aarch64-pc-windows-msvc-zip }}

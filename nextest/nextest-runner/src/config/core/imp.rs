@@ -1,0 +1,2608 @@
+// Copyright (c) The nextest Contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+use super::{
+    ConfigFileSelection, ConfigPaths, ConfigSource, ConfigStyles, ExperimentalDeserialize,
+    NextestVersionDeserialize, ToolConfigFile,
+};
+use crate::{
+    config::{
+        core::ConfigExperimental,
+        elements::{
+            ArchiveConfig, BenchConfig, CustomTestGroup, DefaultBenchConfig, DefaultJunitImpl,
+            FlakyResult, GlobalTimeout, Inherits, JunitConfig, JunitImpl, JunitSettings,
+            LeakTimeout, MaxFail, RetryPolicy, SlowTimeout, TestGroup, TestGroupConfig,
+            TestThreads, ThreadsRequired, deserialize_fail_fast, deserialize_leak_timeout,
+            deserialize_retry_policy, deserialize_slow_timeout,
+        },
+        overrides::{
+            CompiledByProfile, CompiledData, CompiledDefaultFilter, DeserializedOverride,
+            ListSettings, ProfileDefaultFilter, SettingSource, TestSettings,
+            group_membership::PrecomputedGroupMembership,
+        },
+        scripts::{
+            DeserializedProfileScriptConfig, ProfileScriptType, ScriptConfig, ScriptId, ScriptInfo,
+            SetupScriptConfig, SetupScripts,
+        },
+    },
+    errors::{
+        ConfigParseError, ConfigParseErrorKind, InheritsError,
+        ProfileListScriptUsesRunFiltersError, ProfileNotFound, ProfileScriptErrors,
+        ProfileUnknownScriptError, ProfileWrongConfigScriptTypeError, UnknownTestGroupError,
+        provided_by_tool,
+    },
+    helpers::plural,
+    list::{TestInstanceId, TestList},
+    platform::BuildPlatforms,
+    reporter::{FinalStatusLevel, StatusLevel, TestOutputDisplay},
+    run_mode::NextestRunMode,
+};
+use camino::{Utf8Path, Utf8PathBuf};
+use config::{Config, ConfigBuilder, ConfigError, File, FileFormat, builder::DefaultState};
+use iddqd::IdOrdMap;
+use indexmap::IndexMap;
+use nextest_filtering::{
+    BinaryQuery, EvalContext, Filterset, KnownGroups, ParseContext, TestQuery,
+};
+use owo_colors::OwoColorize;
+use petgraph::{Directed, Graph, algo::scc::kosaraju_scc, graph::NodeIndex};
+use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map},
+    sync::LazyLock,
+};
+use tracing::warn;
+
+/// Trait for handling configuration warnings.
+///
+/// This trait allows for different warning handling strategies, such as logging warnings
+/// (the default behavior) or collecting them for testing purposes.
+pub trait ConfigWarnings {
+    /// Handle unknown configuration keys found in a config file.
+    fn unknown_config_keys(&mut self, source: &ConfigSource, unknown: &BTreeSet<String>);
+
+    /// Handle unknown profiles found in the reserved `default-` namespace.
+    fn unknown_reserved_profiles(&mut self, source: &ConfigSource, profiles: &[&str]);
+
+    /// Handle deprecated `[script.*]` configuration.
+    fn deprecated_script_config(&mut self, source: &ConfigSource);
+
+    /// Handle warning about empty script sections with neither setup nor
+    /// wrapper scripts.
+    fn empty_script_sections(
+        &mut self,
+        source: &ConfigSource,
+        profile_name: &str,
+        empty_count: usize,
+    );
+}
+
+/// Default implementation of ConfigWarnings that logs warnings using the
+/// tracing crate.
+#[derive(Clone, Debug, Default)]
+pub struct DefaultConfigWarnings {
+    styles: ConfigStyles,
+}
+
+impl DefaultConfigWarnings {
+    /// Creates an instance of self that style config paths and tool names with
+    /// `styles`.
+    pub fn new(styles: ConfigStyles) -> Self {
+        Self { styles }
+    }
+}
+
+impl ConfigWarnings for DefaultConfigWarnings {
+    fn unknown_config_keys(&mut self, source: &ConfigSource, unknown: &BTreeSet<String>) {
+        let mut unknown_str = String::new();
+        if unknown.len() == 1 {
+            // Print this on the same line.
+            unknown_str.push_str("key: ");
+            unknown_str.push_str(unknown.iter().next().unwrap());
+        } else {
+            unknown_str.push_str("keys:\n");
+            for ignored_key in unknown {
+                unknown_str.push('\n');
+                unknown_str.push_str("  - ");
+                unknown_str.push_str(ignored_key);
+            }
+        }
+
+        warn!(
+            "in config file {}{}, ignoring unknown configuration {unknown_str}",
+            source.path().display().style(self.styles.path),
+            provided_by_tool(source.tool(), self.styles.tool),
+        )
+    }
+
+    fn unknown_reserved_profiles(&mut self, source: &ConfigSource, profiles: &[&str]) {
+        warn!(
+            "in config file {}{}, ignoring unknown profiles in the reserved `default-` namespace:",
+            source.path().display().style(self.styles.path),
+            provided_by_tool(source.tool(), self.styles.tool),
+        );
+
+        for profile in profiles {
+            warn!("  {profile}");
+        }
+    }
+
+    fn deprecated_script_config(&mut self, source: &ConfigSource) {
+        warn!(
+            "in config file {}{}, [script.*] is deprecated and will be removed in a \
+             future version of nextest; use the `scripts.setup` table instead",
+            source.path().display().style(self.styles.path),
+            provided_by_tool(source.tool(), self.styles.tool),
+        );
+    }
+
+    fn empty_script_sections(
+        &mut self,
+        source: &ConfigSource,
+        profile_name: &str,
+        empty_count: usize,
+    ) {
+        warn!(
+            "in config file {}{}, [[profile.{}.scripts]] has {} {} \
+             with neither setup nor wrapper scripts",
+            source.path().display().style(self.styles.path),
+            provided_by_tool(source.tool(), self.styles.tool),
+            profile_name,
+            empty_count,
+            plural::sections_str(empty_count),
+        );
+    }
+}
+
+/// Gets the number of available CPUs and caches the value.
+#[inline]
+pub fn get_num_cpus() -> usize {
+    static NUM_CPUS: LazyLock<usize> =
+        LazyLock::new(|| match std::thread::available_parallelism() {
+            Ok(count) => count.into(),
+            Err(err) => {
+                warn!("unable to determine num-cpus ({err}), assuming 1 logical CPU");
+                1
+            }
+        });
+
+    *NUM_CPUS
+}
+
+/// Overall configuration for nextest.
+///
+/// This is the root data structure for nextest configuration. Most runner-specific configuration is
+/// managed through [profiles](EvaluatableProfile), obtained through the [`profile`](Self::profile)
+/// method.
+///
+/// For more about configuration, see [_Configuration_](https://nexte.st/docs/configuration) in the
+/// nextest book.
+#[derive(Clone, Debug)]
+pub struct NextestConfig {
+    workspace_root: Utf8PathBuf,
+    inner: NextestConfigImpl,
+    compiled: CompiledByProfile,
+}
+
+/// The config path to the default profile's default-filter.
+const DEFAULT_PROFILE_DEFAULT_FILTER_KEY: &str = "profile.default.default-filter";
+
+impl NextestConfig {
+    /// The default location of the config within the path: `.config/nextest.toml`, used to read the
+    /// config from the given directory.
+    pub const CONFIG_PATH: &'static str = ".config/nextest.toml";
+
+    /// Contains the default config as a TOML file.
+    ///
+    /// Repository-specific configuration is layered on top of the default config.
+    pub const DEFAULT_CONFIG: &'static str = include_str!("../../../default-config.toml");
+
+    /// Contains the canonical repository config reference markdown.
+    pub const REFERENCE_MD: &'static str = include_str!("../../../repo-config-reference.md");
+
+    /// The pregenerated JSON Schema for `.config/nextest.toml`.
+    ///
+    /// The schema is checked into the repository at
+    /// `nextest-runner/jsonschemas/repo-config.json`. (If you're working within
+    /// the nextest repository, regenerate the schema with `just
+    /// generate-schemas`.)
+    pub const SCHEMA: &'static str = include_str!("../../../jsonschemas/repo-config.json");
+
+    /// Environment configuration uses this prefix, plus a _.
+    pub const ENVIRONMENT_PREFIX: &'static str = "NEXTEST";
+
+    /// The name of the default profile.
+    pub const DEFAULT_PROFILE: &'static str = "default";
+
+    /// The name of the default profile used for miri.
+    pub const DEFAULT_MIRI_PROFILE: &'static str = "default-miri";
+
+    /// A list containing the names of the Nextest defined reserved profile names.
+    pub const DEFAULT_PROFILES: &'static [&'static str] =
+        &[Self::DEFAULT_PROFILE, Self::DEFAULT_MIRI_PROFILE];
+
+    /// Reads the nextest config from the given file, or if not specified from `.config/nextest.toml`
+    /// in the workspace root.
+    ///
+    /// `tool_config_files` are lower priority than `config_file` but higher priority than the
+    /// default config. Files in `tool_config_files` that come earlier are higher priority than those
+    /// that come later.
+    ///
+    /// If no config files are specified and this file doesn't have `.config/nextest.toml`, uses the
+    /// default config options.
+    pub fn from_sources<'a, I>(
+        workspace_root: impl Into<Utf8PathBuf>,
+        pcx: &ParseContext<'_>,
+        config_file: Option<&Utf8Path>,
+        tool_config_files: impl IntoIterator<IntoIter = I>,
+        experimental: &BTreeSet<ConfigExperimental>,
+    ) -> Result<Self, ConfigParseError>
+    where
+        I: Iterator<Item = &'a ToolConfigFile> + DoubleEndedIterator,
+    {
+        Self::from_sources_with_warnings(
+            workspace_root,
+            pcx,
+            config_file,
+            tool_config_files,
+            experimental,
+            &mut DefaultConfigWarnings::default(),
+        )
+    }
+
+    /// Load configuration from the given sources with custom warning handling.
+    pub fn from_sources_with_warnings<'a, I>(
+        workspace_root: impl Into<Utf8PathBuf>,
+        pcx: &ParseContext<'_>,
+        config_file: Option<&Utf8Path>,
+        tool_config_files: impl IntoIterator<IntoIter = I>,
+        experimental: &BTreeSet<ConfigExperimental>,
+        warnings: &mut impl ConfigWarnings,
+    ) -> Result<Self, ConfigParseError>
+    where
+        I: Iterator<Item = &'a ToolConfigFile> + DoubleEndedIterator,
+    {
+        Self::from_sources_with_selection(
+            workspace_root,
+            pcx,
+            ConfigFileSelection::new(config_file),
+            tool_config_files,
+            experimental,
+            warnings,
+        )
+    }
+
+    /// Reads configuration from the given workspace root and file selection.
+    pub fn from_sources_with_selection<'a, I>(
+        workspace_root: impl Into<Utf8PathBuf>,
+        pcx: &ParseContext<'_>,
+        selection: ConfigFileSelection<'_>,
+        tool_config_files: impl IntoIterator<IntoIter = I>,
+        experimental: &BTreeSet<ConfigExperimental>,
+        warnings: &mut impl ConfigWarnings,
+    ) -> Result<Self, ConfigParseError>
+    where
+        I: Iterator<Item = &'a ToolConfigFile> + DoubleEndedIterator,
+    {
+        let workspace_root = workspace_root.into();
+        Self::from_sources_with_paths(
+            &ConfigPaths::capture(&workspace_root).map_err(|error| {
+                ConfigParseError::from_paths_capture_error(
+                    &workspace_root,
+                    selection.explicit_config_file(),
+                    error,
+                )
+            })?,
+            pcx,
+            selection,
+            tool_config_files,
+            experimental,
+            warnings,
+        )
+    }
+
+    /// Reads configuration from the given paths and file selection.
+    pub fn from_sources_with_paths<'a, I>(
+        paths: &ConfigPaths,
+        pcx: &ParseContext<'_>,
+        selection: ConfigFileSelection<'_>,
+        tool_config_files: impl IntoIterator<IntoIter = I>,
+        experimental: &BTreeSet<ConfigExperimental>,
+        warnings: &mut impl ConfigWarnings,
+    ) -> Result<Self, ConfigParseError>
+    where
+        I: Iterator<Item = &'a ToolConfigFile> + DoubleEndedIterator,
+    {
+        let workspace_root = paths.workspace_root().as_path().to_owned();
+        let tool_config_files_rev = tool_config_files.into_iter().rev();
+        let (inner, compiled) = Self::read_from_sources(
+            pcx,
+            paths,
+            selection,
+            tool_config_files_rev,
+            experimental,
+            warnings,
+        )?;
+        Ok(Self {
+            workspace_root,
+            inner,
+            compiled,
+        })
+    }
+
+    /// Returns the default nextest config.
+    #[cfg(test)]
+    pub(crate) fn default_config(workspace_root: impl Into<Utf8PathBuf>) -> Self {
+        use itertools::Itertools;
+
+        let config = Self::make_default_config()
+            .build()
+            .expect("default config is always valid");
+
+        let mut unknown = BTreeSet::new();
+        let deserialized = Self::deserialize_config(config, |path| {
+            unknown.insert(path.to_string());
+        })
+        .expect("default config is always valid");
+
+        // Make sure there aren't any unknown keys in the default config, since it is
+        // embedded/shipped with this binary.
+        if !unknown.is_empty() {
+            panic!(
+                "found unknown keys in default config: {}",
+                unknown.iter().join(", ")
+            );
+        }
+
+        Self {
+            workspace_root: workspace_root.into(),
+            inner: deserialized.into_config_impl(),
+            // The default config has no overrides or special settings.
+            compiled: CompiledByProfile::for_default_config(),
+        }
+    }
+
+    /// Returns the profile with the given name, or an error if a profile was
+    /// specified but not found.
+    pub fn profile(&self, name: impl AsRef<str>) -> Result<EarlyProfile<'_>, ProfileNotFound> {
+        self.make_profile(name.as_ref())
+    }
+
+    // ---
+    // Helper methods
+    // ---
+
+    fn read_from_sources<'a>(
+        pcx: &ParseContext<'_>,
+        paths: &ConfigPaths,
+        selection: ConfigFileSelection<'_>,
+        tool_config_files_rev: impl Iterator<Item = &'a ToolConfigFile>,
+        experimental: &BTreeSet<ConfigExperimental>,
+        warnings: &mut impl ConfigWarnings,
+    ) -> Result<(NextestConfigImpl, CompiledByProfile), ConfigParseError> {
+        // First, get the default config.
+        let mut composite_builder = Self::make_default_config();
+
+        // Overrides are handled additively.
+        // Note that they're stored in reverse order here, and are flipped over at the end.
+        let mut compiled = CompiledByProfile::for_default_config();
+
+        let mut known_groups = BTreeSet::new();
+        let mut known_scripts = IdOrdMap::new();
+        // Track known profiles for inheritance validation. Profiles can only inherit
+        // from profiles defined in the same file or in previously loaded (lower priority) files.
+        let mut known_profiles = BTreeSet::new();
+
+        for source in selection.sources(paths, tool_config_files_rev)? {
+            let Some(contents) = source.read()? else {
+                continue;
+            };
+            let file_config = Config::builder()
+                .add_source(File::from_str(&contents, FileFormat::Toml))
+                .build()
+                .map_err(|error| ConfigParseError::new(&source, error.into()))?;
+            Self::deserialize_individual_config(
+                pcx,
+                &source,
+                &file_config,
+                &mut compiled,
+                experimental,
+                warnings,
+                &mut known_groups,
+                &mut known_scripts,
+                &mut known_profiles,
+            )?;
+
+            // This is the final, composite builder used at the end.
+            composite_builder = composite_builder.add_source(file_config);
+        }
+
+        let config_file = selection.repo_config_path(paths)?;
+        let composite = composite_builder
+            .build()
+            .map_err(|error| ConfigParseError::from_path(&config_file, error.into()))?;
+        // Unknown keys are ignored here because any values in it have already been reported in
+        // deserialize_individual_config.
+        let config = Self::deserialize_config(composite, |_| {})
+            .map_err(|kind| ConfigParseError::from_path(&config_file, kind))?;
+
+        let config = config.into_config_impl();
+
+        // A higher-priority file can redefine a profile that a lower-priority
+        // file inherits from, so do one final check for cycles in the merged
+        // config.
+        config
+            .sanitize_profile_inherits(&BTreeSet::new())
+            .map_err(|kind| ConfigParseError::from_path(&config_file, kind))?;
+
+        // Reverse all the compiled data at the end.
+        compiled.default.reverse();
+        for data in compiled.other.values_mut() {
+            data.reverse();
+        }
+
+        Ok((config, compiled))
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn deserialize_individual_config(
+        pcx: &ParseContext<'_>,
+        source: &ConfigSource,
+        file_config: &Config,
+        compiled_out: &mut CompiledByProfile,
+        experimental: &BTreeSet<ConfigExperimental>,
+        warnings: &mut impl ConfigWarnings,
+        known_groups: &mut BTreeSet<CustomTestGroup>,
+        known_scripts: &mut IdOrdMap<ScriptInfo>,
+        known_profiles: &mut BTreeSet<String>,
+    ) -> Result<(), ConfigParseError> {
+        // Try building default builder + this file to get good error attribution and handle
+        // overrides additively.
+        let layered = Self::make_default_config()
+            .add_source(file_config.clone())
+            .build()
+            .map_err(|error| ConfigParseError::new(source, error.into()))?;
+        let mut unknown = BTreeSet::new();
+        let mut this_config = Self::deserialize_config(layered, |path| {
+            unknown.insert(path.to_string());
+        })
+        .map_err(|kind| ConfigParseError::new(source, kind))?;
+
+        if !unknown.is_empty() {
+            warnings.unknown_config_keys(source, &unknown);
+        }
+
+        let tool = source.tool();
+
+        // Check that test groups are named as expected.
+        let (valid_groups, invalid_groups): (BTreeSet<_>, _) =
+            this_config.test_groups.keys().cloned().partition(|group| {
+                if let Some(tool) = tool {
+                    // The first component must be the tool name.
+                    group
+                        .as_identifier()
+                        .tool_components()
+                        .is_some_and(|(tool_name, _)| tool_name == tool.as_str())
+                } else {
+                    // If a tool is not specified, it must *not* be a tool identifier.
+                    !group.as_identifier().is_tool_identifier()
+                }
+            });
+
+        if !invalid_groups.is_empty() {
+            let kind = if tool.is_some() {
+                ConfigParseErrorKind::InvalidTestGroupsDefinedByTool(invalid_groups)
+            } else {
+                ConfigParseErrorKind::InvalidTestGroupsDefined(invalid_groups)
+            };
+            return Err(ConfigParseError::new(source, kind));
+        }
+
+        known_groups.extend(valid_groups);
+
+        // If both scripts and old_setup_scripts are present, produce an error.
+        if !this_config.scripts.is_empty() && !this_config.old_setup_scripts.is_empty() {
+            return Err(ConfigParseError::new(
+                source,
+                ConfigParseErrorKind::BothScriptAndScriptsDefined,
+            ));
+        }
+
+        // If old_setup_scripts are present, produce a warning.
+        if !this_config.old_setup_scripts.is_empty() {
+            warnings.deprecated_script_config(source);
+            this_config.scripts.setup = this_config.old_setup_scripts.clone();
+        }
+
+        // Check for experimental features that are used but not enabled.
+        {
+            let mut missing_features = BTreeSet::new();
+            if !this_config.scripts.setup.is_empty()
+                && !experimental.contains(&ConfigExperimental::SetupScripts)
+            {
+                missing_features.insert(ConfigExperimental::SetupScripts);
+            }
+            if !this_config.scripts.wrapper.is_empty()
+                && !experimental.contains(&ConfigExperimental::WrapperScripts)
+            {
+                missing_features.insert(ConfigExperimental::WrapperScripts);
+            }
+            if !missing_features.is_empty() {
+                return Err(ConfigParseError::new(
+                    source,
+                    ConfigParseErrorKind::ExperimentalFeaturesNotEnabled { missing_features },
+                ));
+            }
+        }
+
+        this_config
+            .scripts
+            .check_duplicate_ids()
+            .map_err(|kind| ConfigParseError::new(source, kind))?;
+
+        // Check that setup scripts are named as expected.
+        let (valid_scripts, invalid_scripts): (BTreeSet<_>, _) = this_config
+            .scripts
+            .all_script_ids()
+            .cloned()
+            .partition(|script| {
+                if let Some(tool) = tool {
+                    // The first component must be the tool name.
+                    script
+                        .as_identifier()
+                        .tool_components()
+                        .is_some_and(|(tool_name, _)| tool_name == tool.as_str())
+                } else {
+                    // If a tool is not specified, it must *not* be a tool identifier.
+                    !script.as_identifier().is_tool_identifier()
+                }
+            });
+
+        if !invalid_scripts.is_empty() {
+            let kind = if tool.is_some() {
+                ConfigParseErrorKind::InvalidConfigScriptsDefinedByTool(invalid_scripts)
+            } else {
+                ConfigParseErrorKind::InvalidConfigScriptsDefined(invalid_scripts)
+            };
+            return Err(ConfigParseError::new(source, kind));
+        }
+
+        known_scripts.extend(
+            valid_scripts
+                .into_iter()
+                .map(|id| this_config.scripts.script_info(id)),
+        );
+
+        let this_config = this_config.into_config_impl();
+
+        let unknown_default_profiles: Vec<_> = this_config
+            .all_profiles()
+            .filter(|p| p.starts_with("default-") && !NextestConfig::DEFAULT_PROFILES.contains(p))
+            .collect();
+        if !unknown_default_profiles.is_empty() {
+            warnings.unknown_reserved_profiles(source, &unknown_default_profiles);
+        }
+
+        // Check that the profiles correctly use the inherits setting.
+        // Profiles can only inherit from profiles in the same file or in previously
+        // loaded (lower priority) files.
+        this_config
+            .sanitize_profile_inherits(known_profiles)
+            .map_err(|kind| ConfigParseError::new(source, kind))?;
+
+        // Add this file's profiles to known_profiles for subsequent files.
+        known_profiles.extend(
+            this_config
+                .other_profiles()
+                .map(|(name, _)| name.to_owned()),
+        );
+
+        // Compile the overrides for this file.
+        //
+        // The default-config.toml shipped with nextest sets default-filter only
+        // on profile.default, so that is the only profile that can carry a
+        // filter that this file did not write.
+        let file_default_filter =
+            match file_config.get::<String>(DEFAULT_PROFILE_DEFAULT_FILTER_KEY) {
+                Ok(filter) => Some(filter),
+                Err(ConfigError::NotFound(_)) => None,
+                Err(error) => return Err(ConfigParseError::new(source, error.into())),
+            };
+        let this_compiled = CompiledByProfile::new(
+            pcx,
+            source,
+            &this_config,
+            ProfileDefaultFilter::new(file_default_filter.as_deref()),
+        )
+        .map_err(|kind| ConfigParseError::new(source, kind))?;
+
+        // Check that all overrides specify known test groups.
+        let mut unknown_group_errors = Vec::new();
+        let mut check_test_group = |profile_name: &str, test_group: Option<&TestGroup>| {
+            if let Some(TestGroup::Custom(group)) = test_group
+                && !known_groups.contains(group)
+            {
+                unknown_group_errors.push(UnknownTestGroupError {
+                    profile_name: profile_name.to_owned(),
+                    name: TestGroup::Custom(group.clone()),
+                });
+            }
+        };
+
+        this_compiled
+            .default
+            .overrides
+            .iter()
+            .for_each(|override_| {
+                check_test_group("default", override_.data.test_group.as_ref());
+            });
+
+        // Check that override test groups are known.
+        this_compiled.other.iter().for_each(|(profile_name, data)| {
+            data.overrides.iter().for_each(|override_| {
+                check_test_group(profile_name, override_.data.test_group.as_ref());
+            });
+        });
+
+        // If there were any unknown groups, error out.
+        if !unknown_group_errors.is_empty() {
+            let known_groups = TestGroup::make_all_groups(known_groups.iter().cloned()).collect();
+            return Err(ConfigParseError::new(
+                source,
+                ConfigParseErrorKind::UnknownTestGroups {
+                    errors: unknown_group_errors,
+                    known_groups,
+                },
+            ));
+        }
+
+        // Check that scripts are known and that there aren't any other errors
+        // with them.
+        let mut profile_script_errors = ProfileScriptErrors::default();
+        let mut check_script_ids = |profile_name: &str,
+                                    script_type: ProfileScriptType,
+                                    expr: Option<&Filterset>,
+                                    scripts: &[ScriptId]| {
+            for script in scripts {
+                if let Some(script_info) = known_scripts.get(script) {
+                    if !script_info.script_type.matches(script_type) {
+                        profile_script_errors.wrong_script_types.push(
+                            ProfileWrongConfigScriptTypeError {
+                                profile_name: profile_name.to_owned(),
+                                name: script.clone(),
+                                attempted: script_type,
+                                actual: script_info.script_type,
+                            },
+                        );
+                    }
+                    if script_type == ProfileScriptType::ListWrapper
+                        && let Some(expr) = expr
+                    {
+                        let runtime_only_leaves = expr.parsed.runtime_only_leaves();
+                        if !runtime_only_leaves.is_empty() {
+                            let filters = runtime_only_leaves
+                                .iter()
+                                .map(|leaf| leaf.to_string())
+                                .collect();
+                            profile_script_errors.list_scripts_using_run_filters.push(
+                                ProfileListScriptUsesRunFiltersError {
+                                    profile_name: profile_name.to_owned(),
+                                    name: script.clone(),
+                                    script_type,
+                                    filters,
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    profile_script_errors
+                        .unknown_scripts
+                        .push(ProfileUnknownScriptError {
+                            profile_name: profile_name.to_owned(),
+                            name: script.clone(),
+                        });
+                }
+            }
+        };
+
+        let mut empty_script_count = 0;
+
+        this_compiled.default.scripts.iter().for_each(|scripts| {
+            if scripts.setup.is_empty()
+                && scripts.list_wrapper.is_none()
+                && scripts.run_wrapper.is_none()
+            {
+                empty_script_count += 1;
+            }
+
+            check_script_ids(
+                "default",
+                ProfileScriptType::Setup,
+                scripts.data.expr(),
+                &scripts.setup,
+            );
+            check_script_ids(
+                "default",
+                ProfileScriptType::ListWrapper,
+                scripts.data.expr(),
+                scripts.list_wrapper.as_slice(),
+            );
+            check_script_ids(
+                "default",
+                ProfileScriptType::RunWrapper,
+                scripts.data.expr(),
+                scripts.run_wrapper.as_slice(),
+            );
+        });
+
+        if empty_script_count > 0 {
+            warnings.empty_script_sections(source, "default", empty_script_count);
+        }
+
+        this_compiled.other.iter().for_each(|(profile_name, data)| {
+            let mut empty_script_count = 0;
+            data.scripts.iter().for_each(|scripts| {
+                if scripts.setup.is_empty()
+                    && scripts.list_wrapper.is_none()
+                    && scripts.run_wrapper.is_none()
+                {
+                    empty_script_count += 1;
+                }
+
+                check_script_ids(
+                    profile_name,
+                    ProfileScriptType::Setup,
+                    scripts.data.expr(),
+                    &scripts.setup,
+                );
+                check_script_ids(
+                    profile_name,
+                    ProfileScriptType::ListWrapper,
+                    scripts.data.expr(),
+                    scripts.list_wrapper.as_slice(),
+                );
+                check_script_ids(
+                    profile_name,
+                    ProfileScriptType::RunWrapper,
+                    scripts.data.expr(),
+                    scripts.run_wrapper.as_slice(),
+                );
+            });
+
+            if empty_script_count > 0 {
+                warnings.empty_script_sections(source, profile_name, empty_script_count);
+            }
+        });
+
+        // If there were any errors parsing profile-specific script data, error
+        // out.
+        if !profile_script_errors.is_empty() {
+            let known_scripts = known_scripts
+                .iter()
+                .map(|script| script.id.clone())
+                .collect();
+            return Err(ConfigParseError::new(
+                source,
+                ConfigParseErrorKind::ProfileScriptErrors {
+                    errors: Box::new(profile_script_errors),
+                    known_scripts,
+                },
+            ));
+        }
+
+        // Grab the compiled data (default-filter, overrides and setup scripts) for this config,
+        // adding them in reversed order (we'll flip it around at the end).
+        compiled_out.default.extend_reverse(this_compiled.default);
+        for (name, mut data) in this_compiled.other {
+            match compiled_out.other.entry(name) {
+                hash_map::Entry::Vacant(entry) => {
+                    // When inserting a new element, reverse the data.
+                    data.reverse();
+                    entry.insert(data);
+                }
+                hash_map::Entry::Occupied(mut entry) => {
+                    // When appending to an existing element, extend the data in reverse.
+                    entry.get_mut().extend_reverse(data);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn make_default_config() -> ConfigBuilder<DefaultState> {
+        Config::builder().add_source(File::from_str(Self::DEFAULT_CONFIG, FileFormat::Toml))
+    }
+
+    fn make_profile(&self, name: &str) -> Result<EarlyProfile<'_>, ProfileNotFound> {
+        let custom_profile = self.inner.get_profile(name)?;
+
+        // Resolve the inherited profile into a profile chain
+        let inheritance_chain = self.inner.resolve_inheritance_chain(name)?;
+
+        // The profile was found: construct it.
+        let mut store_dir = self.workspace_root.join(&self.inner.store.dir);
+        store_dir.push(name);
+
+        // Grab the compiled data as well, furthest ancestor first so that the
+        // profile itself ends up with the highest priority.
+        let mut compiled_data = self.compiled.default.clone();
+        for profile_name in inheritance_chain
+            .iter()
+            .rev()
+            .map(|(ancestor, _)| *ancestor)
+            .chain(std::iter::once(name))
+        {
+            // It is possible that a profile in the chain doesn't have any
+            // compiled data associated with it. `compiled.other` is built only
+            // from the config files that were read, so a profile that exists
+            // solely in the embedded default config, such as `default-miri`,
+            // doesn't have an entry in `compiled.other`. Ignore this case since
+            // if there's no data, there's certainly no overrides.
+            if let Some(data) = self.compiled.other.get(profile_name) {
+                compiled_data = data.clone().chain(compiled_data);
+            }
+        }
+
+        Ok(EarlyProfile {
+            name: name.to_owned(),
+            store_dir,
+            default_profile: &self.inner.default_profile,
+            custom_profile,
+            inheritance_chain: inheritance_chain
+                .into_iter()
+                .map(|(_, profile)| profile)
+                .collect(),
+            test_groups: &self.inner.test_groups,
+            scripts: &self.inner.scripts,
+            compiled_data,
+        })
+    }
+
+    fn deserialize_config(
+        config: Config,
+        mut ignored: impl FnMut(serde_ignored::Path<'_>),
+    ) -> Result<NextestConfigDeserialize, ConfigParseErrorKind> {
+        let ignored_de = serde_ignored::Deserializer::new(config, &mut ignored);
+        let config: NextestConfigDeserialize = serde_path_to_error::deserialize(ignored_de)
+            .map_err(|error| {
+                // Both serde_path_to_error and the latest versions of the
+                // config crate report the key. We drop the key from the config
+                // error for consistency.
+                let path = error.path().clone();
+                let config_error = error.into_inner();
+                let error = match config_error {
+                    ConfigError::At { error, .. } => *error,
+                    other => other,
+                };
+                ConfigParseErrorKind::DeserializeError(Box::new(serde_path_to_error::Error::new(
+                    path, error,
+                )))
+            })?;
+
+        Ok(config)
+    }
+}
+
+/// The state of nextest profiles before build platforms have been applied.
+#[derive(Clone, Debug, Default)]
+pub(in crate::config) struct PreBuildPlatform {}
+
+/// The state of nextest profiles after build platforms have been applied.
+#[derive(Clone, Debug)]
+pub(crate) struct FinalConfig {
+    // Evaluation result for host_spec on the host platform.
+    pub(in crate::config) host_eval: bool,
+    // Evaluation result for target_spec corresponding to tests that run on the host platform (e.g.
+    // proc-macro tests).
+    pub(in crate::config) host_test_eval: bool,
+    // Evaluation result for target_spec corresponding to tests that run on the target platform
+    // (most regular tests).
+    pub(in crate::config) target_eval: bool,
+}
+
+/// A nextest profile that can be obtained without identifying the host and
+/// target platforms.
+///
+/// Returned by [`NextestConfig::profile`].
+pub struct EarlyProfile<'cfg> {
+    name: String,
+    store_dir: Utf8PathBuf,
+    default_profile: &'cfg DefaultProfileImpl,
+    custom_profile: Option<&'cfg CustomProfileImpl>,
+    inheritance_chain: Vec<&'cfg CustomProfileImpl>,
+    test_groups: &'cfg BTreeMap<CustomTestGroup, TestGroupConfig>,
+    // This is ordered because the scripts are used in the order they're defined.
+    scripts: &'cfg ScriptConfig,
+    // Invariant: `compiled_data.default_filter` is always present.
+    pub(in crate::config) compiled_data: CompiledData<PreBuildPlatform>,
+}
+
+/// These macros return a specific config field from a profile, checking in
+/// order: custom profile, inheritance chain, then default profile.
+macro_rules! profile_field {
+    ($eval_prof:ident.$field:ident) => {
+        $eval_prof
+            .custom_profile
+            .iter()
+            .chain($eval_prof.inheritance_chain.iter())
+            .find_map(|p| p.$field)
+            .unwrap_or($eval_prof.default_profile.$field)
+    };
+    ($eval_prof:ident.$nested:ident.$field:ident) => {
+        $eval_prof
+            .custom_profile
+            .iter()
+            .chain($eval_prof.inheritance_chain.iter())
+            .find_map(|p| p.$nested.$field)
+            .unwrap_or($eval_prof.default_profile.$nested.$field)
+    };
+    // Variant for method calls with arguments.
+    ($eval_prof:ident.$method:ident($($arg:expr),*)) => {
+        $eval_prof
+            .custom_profile
+            .iter()
+            .chain($eval_prof.inheritance_chain.iter())
+            .find_map(|p| p.$method($($arg),*))
+            .unwrap_or_else(|| $eval_prof.default_profile.$method($($arg),*))
+    };
+}
+macro_rules! profile_field_from_ref {
+    ($eval_prof:ident.$field:ident.$ref_func:ident()) => {
+        $eval_prof
+            .custom_profile
+            .iter()
+            .chain($eval_prof.inheritance_chain.iter())
+            .find_map(|p| p.$field.$ref_func())
+            .unwrap_or(&$eval_prof.default_profile.$field)
+    };
+    ($eval_prof:ident.$nested:ident.$field:ident.$ref_func:ident()) => {
+        $eval_prof
+            .custom_profile
+            .iter()
+            .chain($eval_prof.inheritance_chain.iter())
+            .find_map(|p| p.$nested.$field.$ref_func())
+            .unwrap_or(&$eval_prof.default_profile.$nested.$field)
+    };
+}
+// Variant for fields where both custom and default are Option.
+macro_rules! profile_field_optional {
+    ($eval_prof:ident.$nested:ident.$field:ident.$ref_func:ident()) => {
+        $eval_prof
+            .custom_profile
+            .iter()
+            .chain($eval_prof.inheritance_chain.iter())
+            .find_map(|p| p.$nested.$field.$ref_func())
+            .or($eval_prof.default_profile.$nested.$field.$ref_func())
+    };
+}
+
+impl<'cfg> EarlyProfile<'cfg> {
+    /// Returns the absolute profile-specific store directory.
+    pub fn store_dir(&self) -> &Utf8Path {
+        &self.store_dir
+    }
+
+    /// Returns true if JUnit XML output is configured for this profile.
+    pub fn has_junit(&self) -> bool {
+        profile_field_optional!(self.junit.path.as_deref()).is_some()
+    }
+
+    /// Returns true if any `[[profile.*.scripts]]` section applies to this
+    /// profile.
+    ///
+    /// Which setup scripts run depends on which tests exist, so a caller that
+    /// has not listed every test yet cannot know whether a setup script will
+    /// run. This is the conservative answer: it is true even if no test would
+    /// enable the script.
+    pub fn has_scripts(&self) -> bool {
+        !self.compiled_data.scripts.is_empty()
+    }
+
+    /// Returns the global test group configuration.
+    pub fn test_group_config(&self) -> &'cfg BTreeMap<CustomTestGroup, TestGroupConfig> {
+        self.test_groups
+    }
+
+    /// Returns the known test groups for filterset validation.
+    ///
+    /// Only custom group names are included; `@global` is always
+    /// implicitly valid and handled by `KnownGroups` itself.
+    pub fn known_groups(&self) -> KnownGroups {
+        let custom_groups = self
+            .test_group_config()
+            .keys()
+            .map(|g| g.to_string())
+            .collect();
+        KnownGroups::Known { custom_groups }
+    }
+
+    /// Applies build platforms to make the profile ready for evaluation.
+    ///
+    /// This is a separate step from parsing the config and reading a profile so that cargo-nextest
+    /// can tell users about configuration parsing errors before building the binary list.
+    pub fn apply_build_platforms(
+        self,
+        build_platforms: &BuildPlatforms,
+    ) -> EvaluatableProfile<'cfg> {
+        let compiled_data = self.compiled_data.apply_build_platforms(build_platforms);
+
+        let resolved_default_filter = {
+            // Look for the default filter in the first valid override.
+            let found_filter = compiled_data
+                .overrides
+                .iter()
+                .find_map(|override_data| override_data.default_filter_if_matches_platform());
+            found_filter.unwrap_or_else(|| {
+                // No overrides matching the default filter were found -- use
+                // the profile's default.
+                compiled_data
+                    .profile_default_filter
+                    .as_ref()
+                    .expect("compiled data always has default set")
+            })
+        }
+        .clone();
+
+        EvaluatableProfile {
+            name: self.name,
+            store_dir: self.store_dir,
+            default_profile: self.default_profile,
+            custom_profile: self.custom_profile,
+            inheritance_chain: self.inheritance_chain,
+            scripts: self.scripts,
+            test_groups: self.test_groups,
+            compiled_data,
+            resolved_default_filter,
+        }
+    }
+}
+
+/// A configuration profile for nextest. Contains most configuration used by the nextest runner.
+///
+/// Returned by [`EarlyProfile::apply_build_platforms`].
+#[derive(Clone, Debug)]
+pub struct EvaluatableProfile<'cfg> {
+    name: String,
+    store_dir: Utf8PathBuf,
+    default_profile: &'cfg DefaultProfileImpl,
+    custom_profile: Option<&'cfg CustomProfileImpl>,
+    inheritance_chain: Vec<&'cfg CustomProfileImpl>,
+    test_groups: &'cfg BTreeMap<CustomTestGroup, TestGroupConfig>,
+    // This is ordered because the scripts are used in the order they're defined.
+    scripts: &'cfg ScriptConfig,
+    // Invariant: `compiled_data.default_filter` is always present.
+    pub(in crate::config) compiled_data: CompiledData<FinalConfig>,
+    // The default filter that's been resolved after considering overrides (i.e.
+    // platforms).
+    resolved_default_filter: CompiledDefaultFilter,
+}
+
+impl<'cfg> EvaluatableProfile<'cfg> {
+    /// Returns the name of the profile.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the absolute profile-specific store directory.
+    pub fn store_dir(&self) -> &Utf8Path {
+        &self.store_dir
+    }
+
+    /// Returns the context in which to evaluate filtersets.
+    pub fn filterset_ecx(&self) -> EvalContext<'_> {
+        EvalContext {
+            default_filter: &self.default_filter().expr,
+        }
+    }
+
+    /// Precomputes test group memberships for the given tests.
+    ///
+    /// Uses [`settings_for`](Self::settings_for) to determine each
+    /// test's group, keeping the override resolution logic in one
+    /// place. The result implements [`nextest_filtering::GroupLookup`]
+    /// and should be passed into an [`EvalContext`] for CLI filterset
+    /// evaluation.
+    pub fn precompute_group_memberships<'a>(
+        &self,
+        tests: impl Iterator<Item = TestQuery<'a>>,
+    ) -> PrecomputedGroupMembership {
+        // test_group is not mode-dependent, so the choice of run mode
+        // doesn't matter here.
+        let run_mode = NextestRunMode::Test;
+
+        let mut membership = PrecomputedGroupMembership::empty();
+        for test in tests {
+            let group = self.settings_for(run_mode, &test).test_group().clone();
+            if group != TestGroup::Global {
+                let id = TestInstanceId {
+                    binary_id: test.binary_query.binary_id,
+                    test_name: test.test_name,
+                };
+                membership.insert(id.to_owned(), group);
+            }
+        }
+        membership
+    }
+
+    /// Returns the default set of tests to run.
+    pub fn default_filter(&self) -> &CompiledDefaultFilter {
+        &self.resolved_default_filter
+    }
+
+    /// Returns the global test group configuration.
+    pub fn test_group_config(&self) -> &'cfg BTreeMap<CustomTestGroup, TestGroupConfig> {
+        self.test_groups
+    }
+
+    /// Returns the global script configuration.
+    pub fn script_config(&self) -> &'cfg ScriptConfig {
+        self.scripts
+    }
+
+    /// Returns the retry policy for this profile.
+    pub fn retries(&self) -> RetryPolicy {
+        profile_field!(self.retries)
+    }
+
+    /// Returns the flaky result behavior for this profile.
+    pub fn flaky_result(&self) -> FlakyResult {
+        profile_field!(self.flaky_result)
+    }
+
+    /// Returns the number of threads to run against for this profile.
+    pub fn test_threads(&self) -> TestThreads {
+        profile_field!(self.test_threads)
+    }
+
+    /// Returns the number of threads required for each test.
+    pub fn threads_required(&self) -> ThreadsRequired {
+        profile_field!(self.threads_required)
+    }
+
+    /// Returns extra arguments to be passed to the test binary at runtime.
+    pub fn run_extra_args(&self) -> &'cfg [String] {
+        profile_field_from_ref!(self.run_extra_args.as_deref())
+    }
+
+    /// Returns the time after which tests are treated as slow for this profile.
+    pub fn slow_timeout(&self, run_mode: NextestRunMode) -> SlowTimeout {
+        profile_field!(self.slow_timeout(run_mode))
+    }
+
+    /// Returns the time after which we should stop running tests.
+    pub fn global_timeout(&self, run_mode: NextestRunMode) -> GlobalTimeout {
+        profile_field!(self.global_timeout(run_mode))
+    }
+
+    /// Returns the time after which a child process that hasn't closed its handles is marked as
+    /// leaky.
+    pub fn leak_timeout(&self) -> LeakTimeout {
+        profile_field!(self.leak_timeout)
+    }
+
+    /// Returns the test status level.
+    pub fn status_level(&self) -> StatusLevel {
+        profile_field!(self.status_level)
+    }
+
+    /// Returns the test status level at the end of the run.
+    pub fn final_status_level(&self) -> FinalStatusLevel {
+        profile_field!(self.final_status_level)
+    }
+
+    /// Returns the failure output config for this profile.
+    pub fn failure_output(&self) -> TestOutputDisplay {
+        profile_field!(self.failure_output)
+    }
+
+    /// Returns the failure output config for this profile.
+    pub fn success_output(&self) -> TestOutputDisplay {
+        profile_field!(self.success_output)
+    }
+
+    /// Returns the max-fail config for this profile.
+    pub fn max_fail(&self) -> MaxFail {
+        profile_field!(self.max_fail)
+    }
+
+    /// Returns the archive configuration for this profile.
+    pub fn archive_config(&self) -> &'cfg ArchiveConfig {
+        profile_field_from_ref!(self.archive.as_ref())
+    }
+
+    /// Returns the list of setup scripts.
+    pub fn setup_scripts(&self, test_list: &TestList<'_>) -> SetupScripts<'_> {
+        SetupScripts::new(self, test_list)
+    }
+
+    /// Returns list-time settings for a test binary.
+    pub fn list_settings_for(&self, query: &BinaryQuery<'_>) -> ListSettings<'_> {
+        ListSettings::new(self, query)
+    }
+
+    /// Returns settings for individual tests.
+    pub fn settings_for(
+        &self,
+        run_mode: NextestRunMode,
+        query: &TestQuery<'_>,
+    ) -> TestSettings<'_> {
+        TestSettings::new(self, run_mode, query)
+    }
+
+    /// Returns override settings for individual tests, with sources attached.
+    pub(crate) fn settings_with_source_for(
+        &self,
+        run_mode: NextestRunMode,
+        query: &TestQuery<'_>,
+    ) -> TestSettings<'_, SettingSource<'_>> {
+        TestSettings::new(self, run_mode, query)
+    }
+
+    /// Returns the JUnit configuration for this profile.
+    pub fn junit(&self) -> Option<JunitConfig<'cfg>> {
+        let settings = JunitSettings {
+            path: profile_field_optional!(self.junit.path.as_deref()),
+            report_name: profile_field_from_ref!(self.junit.report_name.as_deref()),
+            store_success_output: profile_field!(self.junit.store_success_output),
+            store_failure_output: profile_field!(self.junit.store_failure_output),
+            report_skipped: profile_field!(self.junit.report_skipped),
+            flaky_fail_status: profile_field!(self.junit.flaky_fail_status),
+        };
+        JunitConfig::new(self.store_dir(), settings)
+    }
+
+    /// Returns the profile that this profile inherits from.
+    pub fn inherits(&self) -> Option<&str> {
+        if let Some(custom_profile) = self.custom_profile {
+            return custom_profile.inherits();
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub(in crate::config) fn custom_profile(&self) -> Option<&'cfg CustomProfileImpl> {
+        self.custom_profile
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::config) struct NextestConfigImpl {
+    store: StoreConfigImpl,
+    test_groups: BTreeMap<CustomTestGroup, TestGroupConfig>,
+    scripts: ScriptConfig,
+    default_profile: DefaultProfileImpl,
+    other_profiles: HashMap<String, CustomProfileImpl>,
+}
+
+impl NextestConfigImpl {
+    fn get_profile(&self, profile: &str) -> Result<Option<&CustomProfileImpl>, ProfileNotFound> {
+        let custom_profile = match profile {
+            NextestConfig::DEFAULT_PROFILE => None,
+            other => Some(
+                self.other_profiles
+                    .get(other)
+                    .ok_or_else(|| ProfileNotFound::new(profile, self.all_profiles()))?,
+            ),
+        };
+        Ok(custom_profile)
+    }
+
+    fn all_profiles(&self) -> impl Iterator<Item = &str> {
+        self.other_profiles
+            .keys()
+            .map(|key| key.as_str())
+            .chain(std::iter::once(NextestConfig::DEFAULT_PROFILE))
+    }
+
+    pub(in crate::config) fn default_profile(&self) -> &DefaultProfileImpl {
+        &self.default_profile
+    }
+
+    pub(in crate::config) fn other_profiles(
+        &self,
+    ) -> impl Iterator<Item = (&str, &CustomProfileImpl)> {
+        self.other_profiles
+            .iter()
+            .map(|(key, value)| (key.as_str(), value))
+    }
+
+    /// Resolve a profile's inheritance chain (ancestors only, not including the
+    /// profile itself).
+    ///
+    /// Returns the chain ordered from immediate parent to furthest ancestor.
+    /// Cycles are assumed to have been checked by `sanitize_profile_inherits()`.
+    fn resolve_inheritance_chain(
+        &self,
+        profile_name: &str,
+    ) -> Result<Vec<(&str, &CustomProfileImpl)>, ProfileNotFound> {
+        let mut chain = Vec::new();
+
+        // Start from the profile's parent, not the profile itself (the profile
+        // is already available via custom_profile).
+        let mut curr = self
+            .get_profile(profile_name)?
+            .and_then(|p| p.inherits.as_deref());
+
+        while let Some(name) = curr {
+            let profile = self.get_profile(name)?;
+            if let Some(profile) = profile {
+                chain.push((name, profile));
+                curr = profile.inherits.as_deref();
+            } else {
+                // Reached the default profile -- stop.
+                break;
+            }
+        }
+
+        Ok(chain)
+    }
+
+    /// Sanitize inherits settings on default and custom profiles.
+    ///
+    /// `known_profiles` contains profiles from previously loaded (lower priority) files.
+    /// A profile can inherit from profiles in the same file or in `known_profiles`.
+    fn sanitize_profile_inherits(
+        &self,
+        known_profiles: &BTreeSet<String>,
+    ) -> Result<(), ConfigParseErrorKind> {
+        let mut inherit_err_collector = Vec::new();
+
+        self.sanitize_default_profile_inherits(&mut inherit_err_collector);
+        self.sanitize_custom_profile_inherits(&mut inherit_err_collector, known_profiles);
+
+        if !inherit_err_collector.is_empty() {
+            return Err(ConfigParseErrorKind::InheritanceErrors(
+                inherit_err_collector,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Check the DefaultProfileImpl and make sure that it doesn't inherit from other
+    /// profiles
+    fn sanitize_default_profile_inherits(&self, inherit_err_collector: &mut Vec<InheritsError>) {
+        if self.default_profile().inherits().is_some() {
+            inherit_err_collector.push(InheritsError::DefaultProfileInheritance(
+                NextestConfig::DEFAULT_PROFILE.to_string(),
+            ));
+        }
+    }
+
+    /// Iterate through each custom profile inherits and report any inheritance error(s).
+    fn sanitize_custom_profile_inherits(
+        &self,
+        inherit_err_collector: &mut Vec<InheritsError>,
+        known_profiles: &BTreeSet<String>,
+    ) {
+        let mut profile_graph = Graph::<&str, (), Directed>::new();
+        let mut profile_map = HashMap::new();
+
+        // Iterate through all custom profiles within the config file and constructs
+        // a reduced graph of the inheritance chain(s)
+        for (name, custom_profile) in self.other_profiles() {
+            let starts_with_default = self.sanitize_custom_default_profile_inherits(
+                name,
+                custom_profile,
+                inherit_err_collector,
+            );
+            if !starts_with_default {
+                // We don't need to add default- profiles. Since they cannot
+                // have inherits specified on them (they effectively always
+                // inherit from default), they cannot participate in inheritance
+                // cycles.
+                self.add_profile_to_graph(
+                    name,
+                    custom_profile,
+                    &mut profile_map,
+                    &mut profile_graph,
+                    inherit_err_collector,
+                    known_profiles,
+                );
+            }
+        }
+
+        self.check_inheritance_cycles(profile_graph, inherit_err_collector);
+    }
+
+    /// Check any CustomProfileImpl that have a "default-" name and make sure they
+    /// do not inherit from other profiles.
+    fn sanitize_custom_default_profile_inherits(
+        &self,
+        name: &str,
+        custom_profile: &CustomProfileImpl,
+        inherit_err_collector: &mut Vec<InheritsError>,
+    ) -> bool {
+        let starts_with_default = name.starts_with("default-");
+
+        if starts_with_default && custom_profile.inherits().is_some() {
+            inherit_err_collector.push(InheritsError::DefaultProfileInheritance(name.to_string()));
+        }
+
+        starts_with_default
+    }
+
+    /// Add the custom profile to the profile graph and collect any inheritance errors like
+    /// self-referential profiles and nonexisting profiles.
+    ///
+    /// `known_profiles` contains profiles from previously loaded (lower priority) files.
+    fn add_profile_to_graph<'cfg>(
+        &self,
+        name: &'cfg str,
+        custom_profile: &'cfg CustomProfileImpl,
+        profile_map: &mut HashMap<&'cfg str, NodeIndex>,
+        profile_graph: &mut Graph<&'cfg str, ()>,
+        inherit_err_collector: &mut Vec<InheritsError>,
+        known_profiles: &BTreeSet<String>,
+    ) {
+        if let Some(inherits_name) = custom_profile.inherits() {
+            if inherits_name == name {
+                inherit_err_collector
+                    .push(InheritsError::SelfReferentialInheritance(name.to_string()))
+            } else if self.get_profile(inherits_name).is_ok() {
+                // Inherited profile exists in this file -- create edge for cycle detection.
+                let from_node = match profile_map.get(name) {
+                    None => {
+                        let profile_node = profile_graph.add_node(name);
+                        profile_map.insert(name, profile_node);
+                        profile_node
+                    }
+                    Some(node_idx) => *node_idx,
+                };
+                let to_node = match profile_map.get(inherits_name) {
+                    None => {
+                        let profile_node = profile_graph.add_node(inherits_name);
+                        profile_map.insert(inherits_name, profile_node);
+                        profile_node
+                    }
+                    Some(node_idx) => *node_idx,
+                };
+                profile_graph.add_edge(from_node, to_node, ());
+            } else if known_profiles.contains(inherits_name) {
+                // Inherited profile exists in a previously loaded file -- valid, no
+                // cycle detection needed (cross-file cycles are impossible with
+                // downward-only inheritance).
+            } else {
+                inherit_err_collector.push(InheritsError::UnknownInheritance(
+                    name.to_string(),
+                    inherits_name.to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Given a profile graph, reports all SCC cycles within the graph using kosaraju algorithm.
+    fn check_inheritance_cycles(
+        &self,
+        profile_graph: Graph<&str, ()>,
+        inherit_err_collector: &mut Vec<InheritsError>,
+    ) {
+        let profile_sccs: Vec<Vec<NodeIndex>> = kosaraju_scc(&profile_graph);
+        let profile_sccs: Vec<Vec<NodeIndex>> = profile_sccs
+            .into_iter()
+            .filter(|scc| scc.len() >= 2)
+            .collect();
+
+        if !profile_sccs.is_empty() {
+            inherit_err_collector.push(InheritsError::InheritanceCycle(
+                profile_sccs
+                    .iter()
+                    .map(|node_idxs| {
+                        let profile_names: Vec<String> = node_idxs
+                            .iter()
+                            .map(|node_idx| profile_graph[*node_idx].to_string())
+                            .collect();
+                        profile_names
+                    })
+                    .collect(),
+            ));
+        }
+    }
+}
+
+// This is the form of `NextestConfig` that gets deserialized.
+//
+// NOTE: NextestConfigDeserialize doesn't map directly to nextest.toml,
+//       as some fields are preprocessed with default values.
+//       Thus, parts of the JSON Schema require customization.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "config-schema", schemars(deny_unknown_fields))]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct NextestConfigDeserialize {
+    /// Configuration for the nextest store directory.
+    #[cfg_attr(
+        feature = "config-schema",
+        // NOTE: `store` in the JSON Schema should be optional, given the pre-deserialization logic.
+        schemars(with = "Option<StoreConfigImpl>")
+    )]
+    store: StoreConfigImpl,
+
+    /// The minimum required (and optionally recommended) version of nextest
+    /// for this configuration.
+    // These are parsed as part of NextestConfigVersionOnly. They're re-parsed
+    // here to avoid printing an "unknown key" message.
+    #[expect(unused)]
+    #[serde(default)]
+    nextest_version: Option<NextestVersionDeserialize>,
+
+    /// Enables experimental, non-stable features.
+    #[expect(unused)]
+    #[serde(default)]
+    experimental: ExperimentalDeserialize,
+
+    /// Custom test groups for mutual exclusion and resource management, keyed
+    /// by group name.
+    #[serde(default)]
+    test_groups: BTreeMap<CustomTestGroup, TestGroupConfig>,
+
+    /// Deprecated location for setup scripts.
+    ///
+    /// New configurations should use `[scripts.setup.<name>]` instead.
+    // Previous version of setup scripts, stored as "script.<name of script>".
+    #[serde(default, rename = "script")]
+    old_setup_scripts: IndexMap<ScriptId, SetupScriptConfig>,
+
+    /// Setup and wrapper scripts, keyed by script name.
+    #[serde(default)]
+    scripts: ScriptConfig,
+
+    /// Test profiles, keyed by profile name.
+    #[serde(rename = "profile")]
+    #[cfg_attr(
+        feature = "config-schema",
+        // NOTE: `profiles` in the JSON Schema should be optional, given the pre-deserialization logic.
+        schemars(with = "Option<HashMap<String, CustomProfileImpl>>")
+    )]
+    profiles: HashMap<String, CustomProfileImpl>,
+}
+
+impl NextestConfigDeserialize {
+    fn into_config_impl(mut self) -> NextestConfigImpl {
+        let p = self
+            .profiles
+            .remove("default")
+            .expect("default profile should exist");
+        let default_profile = DefaultProfileImpl::new(p);
+
+        // XXX: This is not quite right (doesn't obey precedence) but is okay
+        // because it's unlikely folks are using the combination of setup
+        // scripts *and* tools *and* relying on this. If it breaks, well, this
+        // feature isn't stable.
+        for (script_id, script_config) in self.old_setup_scripts {
+            if let indexmap::map::Entry::Vacant(entry) = self.scripts.setup.entry(script_id) {
+                entry.insert(script_config);
+            }
+        }
+
+        NextestConfigImpl {
+            store: self.store,
+            default_profile,
+            test_groups: self.test_groups,
+            scripts: self.scripts,
+            other_profiles: self.profiles,
+        }
+    }
+}
+
+/// Returns the JSON schema for `.config/nextest.toml`.
+///
+/// The schema is intentionally stricter than nextest's runtime parser. Unknown
+/// fields are warnings at runtime, since this lets older nextest binaries
+/// continue to load configs written for newer versions. In the schema, however,
+/// unknown fields are errors so that editors surface them as likely typos. This
+/// is the reason behind the various `schemars(deny_unknown_fields)` attributes
+/// and `additionalProperties: false` clauses in the custom `JsonSchema` impls
+/// across the config module.
+#[cfg(feature = "config-schema")]
+pub fn nextest_config_schema() -> schemars::Schema {
+    let mut schema = schemars::schema_for!(NextestConfigDeserialize);
+    // This indicates to Tombi that nextest supports TOML 1.1.0.
+    schema.insert(
+        "x-tombi-toml-version".to_owned(),
+        serde_json::Value::String("v1.1.0".to_owned()),
+    );
+    schema
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "config-schema", schemars(deny_unknown_fields))]
+#[serde(rename_all = "kebab-case")]
+struct StoreConfigImpl {
+    /// Directory where nextest stores its data.
+    #[cfg_attr(
+        feature = "config-schema",
+        // NOTE: `dir` in the JSON Schema should be optional, given the pre-deserialization logic.
+        schemars(with = "Option<String>")
+    )]
+    dir: Utf8PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::config) struct DefaultProfileImpl {
+    test_threads: TestThreads,
+    threads_required: ThreadsRequired,
+    run_extra_args: Vec<String>,
+    retries: RetryPolicy,
+    flaky_result: FlakyResult,
+    status_level: StatusLevel,
+    final_status_level: FinalStatusLevel,
+    failure_output: TestOutputDisplay,
+    success_output: TestOutputDisplay,
+    max_fail: MaxFail,
+    slow_timeout: SlowTimeout,
+    global_timeout: GlobalTimeout,
+    leak_timeout: LeakTimeout,
+    overrides: Vec<DeserializedOverride>,
+    scripts: Vec<DeserializedProfileScriptConfig>,
+    junit: DefaultJunitImpl,
+    archive: ArchiveConfig,
+    bench: DefaultBenchConfig,
+    inherits: Inherits,
+}
+
+impl DefaultProfileImpl {
+    fn new(p: CustomProfileImpl) -> Self {
+        Self {
+            test_threads: p
+                .test_threads
+                .expect("test-threads present in default profile"),
+            threads_required: p
+                .threads_required
+                .expect("threads-required present in default profile"),
+            run_extra_args: p
+                .run_extra_args
+                .expect("run-extra-args present in default profile"),
+            retries: p.retries.expect("retries present in default profile"),
+            flaky_result: p
+                .flaky_result
+                .expect("flaky-result present in default profile"),
+            status_level: p
+                .status_level
+                .expect("status-level present in default profile"),
+            final_status_level: p
+                .final_status_level
+                .expect("final-status-level present in default profile"),
+            failure_output: p
+                .failure_output
+                .expect("failure-output present in default profile"),
+            success_output: p
+                .success_output
+                .expect("success-output present in default profile"),
+            max_fail: p.max_fail.expect("fail-fast present in default profile"),
+            slow_timeout: p
+                .slow_timeout
+                .expect("slow-timeout present in default profile"),
+            global_timeout: p
+                .global_timeout
+                .expect("global-timeout present in default profile"),
+            leak_timeout: p
+                .leak_timeout
+                .expect("leak-timeout present in default profile"),
+            overrides: p.overrides,
+            scripts: p.scripts,
+            junit: DefaultJunitImpl::for_default_profile(p.junit),
+            archive: p.archive.expect("archive present in default profile"),
+            bench: DefaultBenchConfig::for_default_profile(
+                p.bench.expect("bench present in default profile"),
+            ),
+            inherits: Inherits::new(p.inherits),
+        }
+    }
+
+    pub(in crate::config) fn inherits(&self) -> Option<&str> {
+        self.inherits.inherits_from()
+    }
+
+    pub(in crate::config) fn overrides(&self) -> &[DeserializedOverride] {
+        &self.overrides
+    }
+
+    pub(in crate::config) fn setup_scripts(&self) -> &[DeserializedProfileScriptConfig] {
+        &self.scripts
+    }
+
+    pub(in crate::config) fn slow_timeout(&self, run_mode: NextestRunMode) -> SlowTimeout {
+        match run_mode {
+            NextestRunMode::Test => self.slow_timeout,
+            NextestRunMode::Benchmark => self.bench.slow_timeout,
+        }
+    }
+
+    pub(in crate::config) fn global_timeout(&self, run_mode: NextestRunMode) -> GlobalTimeout {
+        match run_mode {
+            NextestRunMode::Test => self.global_timeout,
+            NextestRunMode::Benchmark => self.bench.global_timeout,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "config-schema", schemars(deny_unknown_fields))]
+#[serde(rename_all = "kebab-case")]
+pub(in crate::config) struct CustomProfileImpl {
+    /// The default set of tests run by `cargo nextest run`, as a filterset
+    /// expression.
+    #[serde(default)]
+    default_filter: Option<String>,
+    /// Retry policy for failed tests.
+    #[serde(default, deserialize_with = "deserialize_retry_policy")]
+    retries: Option<RetryPolicy>,
+    /// Whether to treat flaky tests as passing or failing.
+    #[serde(default)]
+    flaky_result: Option<FlakyResult>,
+    /// Number of threads to run tests with.
+    #[serde(default)]
+    test_threads: Option<TestThreads>,
+    /// Number of threads (slots) each test reserves from the pool.
+    #[serde(default)]
+    threads_required: Option<ThreadsRequired>,
+    /// Extra arguments to pass to test binaries.
+    #[serde(default)]
+    run_extra_args: Option<Vec<String>>,
+    /// Level of status information to display during test runs.
+    #[serde(default)]
+    status_level: Option<StatusLevel>,
+    /// Level of status information to display in the final summary.
+    #[serde(default)]
+    final_status_level: Option<FinalStatusLevel>,
+    /// When to display output for failed tests.
+    #[serde(default)]
+    failure_output: Option<TestOutputDisplay>,
+    /// When to display output for successful tests.
+    #[serde(default)]
+    success_output: Option<TestOutputDisplay>,
+    /// Controls when to stop running tests after failures.
+    #[serde(
+        default,
+        rename = "fail-fast",
+        deserialize_with = "deserialize_fail_fast"
+    )]
+    max_fail: Option<MaxFail>,
+    /// Time after which tests are considered slow, plus optional termination
+    /// policy.
+    #[serde(default, deserialize_with = "deserialize_slow_timeout")]
+    slow_timeout: Option<SlowTimeout>,
+    /// A global timeout for the entire test run.
+    #[serde(default)]
+    global_timeout: Option<GlobalTimeout>,
+    /// Time to wait for child processes to exit after a test completes.
+    #[serde(default, deserialize_with = "deserialize_leak_timeout")]
+    leak_timeout: Option<LeakTimeout>,
+    /// Per-test setting overrides, evaluated in order.
+    #[serde(default)]
+    overrides: Vec<DeserializedOverride>,
+    /// Profile-specific script bindings (setup and wrapper).
+    #[serde(default)]
+    scripts: Vec<DeserializedProfileScriptConfig>,
+    /// JUnit XML output configuration.
+    #[serde(default)]
+    junit: JunitImpl,
+    /// Archive configuration for this profile.
+    #[serde(default)]
+    archive: Option<ArchiveConfig>,
+    /// Benchmark-specific configuration.
+    #[serde(default)]
+    bench: Option<BenchConfig>,
+    /// The profile to inherit settings from.
+    #[serde(default)]
+    inherits: Option<String>,
+}
+
+impl CustomProfileImpl {
+    #[cfg(test)]
+    pub(in crate::config) fn test_threads(&self) -> Option<TestThreads> {
+        self.test_threads
+    }
+
+    pub(in crate::config) fn default_filter(&self) -> Option<&str> {
+        self.default_filter.as_deref()
+    }
+
+    pub(in crate::config) fn slow_timeout(&self, run_mode: NextestRunMode) -> Option<SlowTimeout> {
+        match run_mode {
+            NextestRunMode::Test => self.slow_timeout,
+            NextestRunMode::Benchmark => self.bench.as_ref().and_then(|b| b.slow_timeout),
+        }
+    }
+
+    pub(in crate::config) fn global_timeout(
+        &self,
+        run_mode: NextestRunMode,
+    ) -> Option<GlobalTimeout> {
+        match run_mode {
+            NextestRunMode::Test => self.global_timeout,
+            NextestRunMode::Benchmark => self.bench.as_ref().and_then(|b| b.global_timeout),
+        }
+    }
+
+    pub(in crate::config) fn inherits(&self) -> Option<&str> {
+        self.inherits.as_deref()
+    }
+
+    pub(in crate::config) fn overrides(&self) -> &[DeserializedOverride] {
+        &self.overrides
+    }
+
+    pub(in crate::config) fn scripts(&self) -> &[DeserializedProfileScriptConfig] {
+        &self.scripts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        core::{ConfigSourceKind, ToolName},
+        overrides::CompiledDefaultFilterSection,
+        utils::test_helpers::*,
+    };
+    use camino_tempfile::{Utf8TempDir, tempdir};
+    use guppy::graph::cargo::BuildPlatform;
+    use iddqd::{IdHashItem, IdHashMap, id_hash_map, id_upcast};
+    use nextest_filtering::{CompiledExpr, FiltersetKind};
+    use nextest_metadata::TestCaseName;
+    use std::time::Duration;
+    use test_case::test_case;
+
+    fn tool_name(s: &str) -> ToolName {
+        ToolName::new(s.into()).unwrap()
+    }
+
+    /// Test implementation of ConfigWarnings that collects warnings for testing.
+    #[derive(Default)]
+    struct TestConfigWarnings {
+        unknown_keys: IdHashMap<UnknownKeys>,
+        reserved_profiles: IdHashMap<ReservedProfiles>,
+        deprecated_scripts: IdHashMap<DeprecatedScripts>,
+        empty_script_warnings: IdHashMap<EmptyScriptSections>,
+    }
+
+    impl ConfigWarnings for TestConfigWarnings {
+        fn unknown_config_keys(&mut self, source: &ConfigSource, unknown: &BTreeSet<String>) {
+            self.unknown_keys
+                .insert_unique(UnknownKeys {
+                    kind: source.kind().clone(),
+                    config_file: source.path().absolute_path().to_owned(),
+                    keys: unknown.clone(),
+                })
+                .expect("each config source reports unknown keys at most once");
+        }
+
+        fn unknown_reserved_profiles(&mut self, source: &ConfigSource, profiles: &[&str]) {
+            self.reserved_profiles
+                .insert_unique(ReservedProfiles {
+                    kind: source.kind().clone(),
+                    config_file: source.path().absolute_path().to_owned(),
+                    profiles: profiles.iter().map(|&s| s.to_owned()).collect(),
+                })
+                .expect("each config source reports reserved profiles at most once");
+        }
+
+        fn empty_script_sections(
+            &mut self,
+            source: &ConfigSource,
+            profile_name: &str,
+            empty_count: usize,
+        ) {
+            self.empty_script_warnings
+                .insert_unique(EmptyScriptSections {
+                    kind: source.kind().clone(),
+                    config_file: source.path().absolute_path().to_owned(),
+                    profile_name: profile_name.to_owned(),
+                    empty_count,
+                })
+                .expect(
+                    "each config source reports a profile's empty script sections at most once",
+                );
+        }
+
+        fn deprecated_script_config(&mut self, source: &ConfigSource) {
+            self.deprecated_scripts
+                .insert_unique(DeprecatedScripts {
+                    kind: source.kind().clone(),
+                    config_file: source.path().absolute_path().to_owned(),
+                })
+                .expect("each config source reports deprecated script config at most once");
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct UnknownKeys {
+        kind: ConfigSourceKind,
+        config_file: Utf8PathBuf,
+        keys: BTreeSet<String>,
+    }
+
+    impl IdHashItem for UnknownKeys {
+        type Key<'a> = &'a ConfigSourceKind;
+        fn key(&self) -> Self::Key<'_> {
+            &self.kind
+        }
+        id_upcast!();
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ReservedProfiles {
+        kind: ConfigSourceKind,
+        config_file: Utf8PathBuf,
+        profiles: Vec<String>,
+    }
+
+    impl IdHashItem for ReservedProfiles {
+        type Key<'a> = &'a ConfigSourceKind;
+        fn key(&self) -> Self::Key<'_> {
+            &self.kind
+        }
+        id_upcast!();
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct DeprecatedScripts {
+        kind: ConfigSourceKind,
+        config_file: Utf8PathBuf,
+    }
+
+    impl IdHashItem for DeprecatedScripts {
+        type Key<'a> = &'a ConfigSourceKind;
+        fn key(&self) -> Self::Key<'_> {
+            &self.kind
+        }
+        id_upcast!();
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct EmptyScriptSections {
+        kind: ConfigSourceKind,
+        config_file: Utf8PathBuf,
+        profile_name: String,
+        empty_count: usize,
+    }
+
+    impl IdHashItem for EmptyScriptSections {
+        type Key<'a> = (&'a ConfigSourceKind, &'a str);
+        fn key(&self) -> Self::Key<'_> {
+            (&self.kind, &self.profile_name)
+        }
+        id_upcast!();
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        let default_config = NextestConfig::default_config("foo");
+        default_config
+            .profile(NextestConfig::DEFAULT_PROFILE)
+            .expect("default profile should exist");
+    }
+
+    #[test]
+    fn ignored_keys() {
+        let config_contents = r#"
+        ignored1 = "test"
+
+        [profile.default]
+        retries = 3
+        ignored2 = "hi"
+
+        [profile.default-foo]
+        retries = 5
+
+        [[profile.default.overrides]]
+        filter = 'test(test_foo)'
+        retries = 20
+        ignored3 = 42
+        "#;
+
+        let tool_config_contents = r#"
+        [store]
+        ignored4 = 20
+
+        [profile.default]
+        retries = 4
+        ignored5 = false
+
+        [profile.default-bar]
+        retries = 5
+
+        [profile.tool]
+        retries = 12
+
+        [[profile.tool.overrides]]
+        filter = 'test(test_baz)'
+        retries = 22
+        ignored6 = 6.5
+        "#;
+
+        let workspace_dir = tempdir().unwrap();
+
+        let graph = temp_workspace(&workspace_dir, config_contents);
+        let workspace_root = graph.workspace().root();
+        let tool_path = workspace_root.join(".config/tool.toml");
+        std::fs::write(&tool_path, tool_config_contents).unwrap();
+
+        let pcx = ParseContext::new(&graph);
+
+        let mut warnings = TestConfigWarnings::default();
+
+        let _ = NextestConfig::from_sources_with_warnings(
+            workspace_root,
+            &pcx,
+            None,
+            &[ToolConfigFile {
+                tool: tool_name("my-tool"),
+                config_file: tool_path.clone(),
+            }][..],
+            &Default::default(),
+            &mut warnings,
+        )
+        .expect("config is valid");
+
+        assert_eq!(
+            warnings.unknown_keys.len(),
+            2,
+            "there are two files with unknown keys"
+        );
+
+        assert_eq!(
+            warnings.unknown_keys,
+            id_hash_map! {
+                UnknownKeys {
+                    kind: ConfigSourceKind::DiscoveredRepository,
+                    config_file: workspace_root.join(".config/nextest.toml"),
+                    keys: maplit::btreeset! {
+                        "ignored1".to_owned(),
+                        "profile.default.ignored2".to_owned(),
+                        "profile.default.overrides.0.ignored3".to_owned(),
+                    }
+                },
+                UnknownKeys {
+                    kind: ConfigSourceKind::Tool(tool_name("my-tool")),
+                    config_file: tool_path.clone(),
+                    keys: maplit::btreeset! {
+                        "store.ignored4".to_owned(),
+                        "profile.default.ignored5".to_owned(),
+                        "profile.tool.overrides.0.ignored6".to_owned(),
+                    }
+                }
+            }
+        );
+        assert_eq!(
+            warnings.reserved_profiles,
+            id_hash_map! {
+                ReservedProfiles {
+                    kind: ConfigSourceKind::DiscoveredRepository,
+                    config_file: workspace_root.join(".config/nextest.toml"),
+                    profiles: vec!["default-foo".to_owned()],
+                },
+                ReservedProfiles {
+                    kind: ConfigSourceKind::Tool(tool_name("my-tool")),
+                    config_file: tool_path,
+                    profiles: vec!["default-bar".to_owned()],
+                }
+            },
+        )
+    }
+
+    #[test]
+    fn script_warnings() {
+        let config_contents = r#"
+        experimental = ["setup-scripts", "wrapper-scripts"]
+
+        [scripts.wrapper.script1]
+        command = "echo test"
+
+        [scripts.wrapper.script2]
+        command = "echo test2"
+
+        [scripts.setup.script3]
+        command = "echo setup"
+
+        [[profile.default.scripts]]
+        filter = 'all()'
+        # Empty - no setup or wrapper scripts
+
+        [[profile.default.scripts]]
+        filter = 'test(foo)'
+        setup = ["script3"]
+
+        [profile.custom]
+        [[profile.custom.scripts]]
+        filter = 'all()'
+        # Empty - no setup or wrapper scripts
+
+        [[profile.custom.scripts]]
+        filter = 'test(bar)'
+        # Another empty section
+        "#;
+
+        let tool_config_contents = r#"
+        experimental = ["setup-scripts", "wrapper-scripts"]
+
+        [scripts.wrapper."@tool:tool:disabled_script"]
+        command = "echo disabled"
+
+        [scripts.setup."@tool:tool:setup_script"]
+        command = "echo setup"
+
+        [profile.tool]
+        [[profile.tool.scripts]]
+        filter = 'all()'
+        # Empty section
+
+        [[profile.tool.scripts]]
+        filter = 'test(foo)'
+        setup = ["@tool:tool:setup_script"]
+        "#;
+
+        let workspace_dir = tempdir().unwrap();
+        let graph = temp_workspace(&workspace_dir, config_contents);
+        let workspace_root = graph.workspace().root();
+        let tool_path = workspace_root.join(".config/tool.toml");
+        std::fs::write(&tool_path, tool_config_contents).unwrap();
+
+        let pcx = ParseContext::new(&graph);
+
+        let mut warnings = TestConfigWarnings::default();
+
+        let experimental = maplit::btreeset! {
+            ConfigExperimental::SetupScripts,
+            ConfigExperimental::WrapperScripts
+        };
+        let _ = NextestConfig::from_sources_with_warnings(
+            workspace_root,
+            &pcx,
+            None,
+            &[ToolConfigFile {
+                tool: tool_name("tool"),
+                config_file: tool_path.clone(),
+            }][..],
+            &experimental,
+            &mut warnings,
+        )
+        .expect("config is valid");
+
+        assert_eq!(
+            warnings.empty_script_warnings,
+            id_hash_map! {
+                EmptyScriptSections {
+                    kind: ConfigSourceKind::DiscoveredRepository,
+                    config_file: workspace_root.join(".config/nextest.toml"),
+                    profile_name: "default".to_owned(),
+                    empty_count: 1,
+                },
+                EmptyScriptSections {
+                    kind: ConfigSourceKind::DiscoveredRepository,
+                    config_file: workspace_root.join(".config/nextest.toml"),
+                    profile_name: "custom".to_owned(),
+                    empty_count: 2,
+                },
+                EmptyScriptSections {
+                    kind: ConfigSourceKind::Tool(tool_name("tool")),
+                    config_file: tool_path,
+                    profile_name: "tool".to_owned(),
+                    empty_count: 1,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn deprecated_script_config_warning() {
+        let config_contents = r#"
+        experimental = ["setup-scripts"]
+
+        [script.my-script]
+        command = "echo hello"
+"#;
+
+        let tool_config_contents = r#"
+        experimental = ["setup-scripts"]
+
+        [script."@tool:my-tool:my-script"]
+        command = "echo hello"
+"#;
+
+        let temp_dir = tempdir().unwrap();
+
+        let graph = temp_workspace(&temp_dir, config_contents);
+        let workspace_root = graph.workspace().root();
+        let tool_path = workspace_root.join(".config/my-tool.toml");
+        std::fs::write(&tool_path, tool_config_contents).unwrap();
+        let pcx = ParseContext::new(&graph);
+
+        let mut warnings = TestConfigWarnings::default();
+        NextestConfig::from_sources_with_warnings(
+            graph.workspace().root(),
+            &pcx,
+            None,
+            &[ToolConfigFile {
+                tool: tool_name("my-tool"),
+                config_file: tool_path.clone(),
+            }],
+            &maplit::btreeset! {ConfigExperimental::SetupScripts},
+            &mut warnings,
+        )
+        .expect("config is valid");
+
+        assert_eq!(
+            warnings.deprecated_scripts,
+            id_hash_map! {
+                DeprecatedScripts {
+                    kind: ConfigSourceKind::DiscoveredRepository,
+                    config_file: graph.workspace().root().join(".config/nextest.toml"),
+                },
+                DeprecatedScripts {
+                    kind: ConfigSourceKind::Tool(tool_name("my-tool")),
+                    config_file: tool_path,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn inherited_profiles_contribute_compiled_data() {
+        let dir = tempdir().unwrap();
+        let graph = temp_workspace(
+            &dir,
+            r#"
+            [scripts.setup.prepare]
+            command = "echo prepare"
+
+            [scripts.wrapper.grandparent-wrapper]
+            command = "grandparent-wrapper"
+
+            [scripts.wrapper.parent-wrapper]
+            command = "parent-wrapper"
+
+            [[profile.default.overrides]]
+            filter = "all()"
+            retries = 3
+            slow-timeout = "10s"
+
+            [profile.grandparent]
+
+            [[profile.grandparent.overrides]]
+            filter = "test(parent)"
+            retries = 13
+            slow-timeout = "30s"
+
+            [[profile.grandparent.scripts]]
+            filter = "all()"
+            run-wrapper = "grandparent-wrapper"
+
+            [profile.parent]
+            inherits = "grandparent"
+            default-filter = "test(parent)"
+
+            [[profile.parent.overrides]]
+            filter = "test(parent)"
+            retries = 8
+            slow-timeout = "40s"
+
+            [[profile.parent.scripts]]
+            filter = "all()"
+            setup = ["prepare"]
+
+            [[profile.parent.scripts]]
+            filter = "test(parent)"
+            run-wrapper = "parent-wrapper"
+
+            [profile.child]
+            inherits = "parent"
+
+            [[profile.child.overrides]]
+            filter = "test(child)"
+            retries = 5
+        "#,
+        );
+        let pcx = ParseContext::new(&graph);
+        let config = NextestConfig::from_sources(
+            dir.path(),
+            &pcx,
+            None,
+            &[],
+            &maplit::btreeset! {
+                ConfigExperimental::SetupScripts,
+                ConfigExperimental::WrapperScripts,
+            },
+        )
+        .unwrap();
+        let profile = config
+            .profile("child")
+            .unwrap()
+            .apply_build_platforms(&build_platforms());
+
+        let override_profiles: Vec<_> = profile
+            .compiled_data
+            .overrides
+            .iter()
+            .map(|override_| override_.id().profile_name.as_str())
+            .collect();
+        assert_eq!(
+            override_profiles,
+            ["child", "parent", "grandparent", "default"],
+            "overrides are ordered from the profile itself to its furthest ancestor"
+        );
+        assert_eq!(
+            profile.default_filter().profile,
+            "parent",
+            "default-filter is inherited from the nearest ancestor that sets it"
+        );
+
+        let package_id = graph.workspace().iter().next().unwrap().id();
+        let binary = binary_query(
+            &graph,
+            package_id,
+            "lib",
+            "test-package",
+            BuildPlatform::Target,
+        );
+        for (name, retries, timeout, wrapper) in [
+            ("child_only", 5, 10, Some("grandparent-wrapper")),
+            ("parent_only", 8, 40, Some("parent-wrapper")),
+            ("parent_and_child", 5, 40, Some("parent-wrapper")),
+            ("other", 3, 10, Some("grandparent-wrapper")),
+        ] {
+            let test_name = TestCaseName::new(name);
+            let query = TestQuery {
+                binary_query: binary.to_query(),
+                test_name: &test_name,
+            };
+            let settings = profile.settings_for(NextestRunMode::Test, &query);
+            assert_eq!(settings.retries().count(), retries, "retries for {name}");
+            assert_eq!(
+                settings.slow_timeout().period,
+                Duration::from_secs(timeout),
+                "slow timeout for {name}"
+            );
+            assert_eq!(
+                settings
+                    .run_wrapper()
+                    .map(|wrapper| wrapper.command.program.as_str()),
+                wrapper,
+                "run wrapper for {name}"
+            );
+        }
+
+        let setup_scripts: Vec<_> = profile
+            .compiled_data
+            .scripts
+            .iter()
+            .flat_map(|scripts| scripts.setup.iter().cloned())
+            .collect();
+        assert_eq!(
+            setup_scripts,
+            [ScriptId::new("prepare".into()).unwrap()],
+            "child profile inherits the parent profile's setup script selection"
+        );
+    }
+
+    #[test]
+    fn cross_file_inheritance_cycle_is_rejected() {
+        let workspace_dir = tempdir().unwrap();
+        let graph = temp_workspace(&workspace_dir, "");
+        let workspace_root = graph.workspace().root();
+
+        // Each file on its own is acyclic -- the cycle only exists once the
+        // higher-priority file redefines `a`.
+        let lower_path = workspace_root.join(".config/lower.toml");
+        std::fs::write(
+            &lower_path,
+            "[profile.a]\nretries = 1\n[profile.b]\ninherits = 'a'\n",
+        )
+        .unwrap();
+        let upper_path = workspace_root.join(".config/upper.toml");
+        std::fs::write(&upper_path, "[profile.a]\ninherits = 'b'\n").unwrap();
+
+        // Tool files are processed in reverse array order, so the redefining
+        // file comes first here to be merged last.
+        let error = NextestConfig::from_sources(
+            workspace_root,
+            &ParseContext::new(&graph),
+            None,
+            &[
+                ToolConfigFile {
+                    tool: tool_name("upper"),
+                    config_file: upper_path,
+                },
+                ToolConfigFile {
+                    tool: tool_name("lower"),
+                    config_file: lower_path,
+                },
+            ][..],
+            &Default::default(),
+        )
+        .expect_err("a cycle spanning config files is rejected");
+
+        let ConfigParseErrorKind::InheritanceErrors(errors) = error.kind() else {
+            panic!("expected inheritance errors, got {error:?}");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, InheritsError::InheritanceCycle(_))),
+            "{errors:?}"
+        );
+    }
+
+    fn tool_config_file(
+        dir: &Utf8TempDir,
+        file_name: &str,
+        tool: &str,
+        contents: &str,
+    ) -> ToolConfigFile {
+        let config_file = dir.path().join(file_name);
+        std::fs::write(&config_file, contents).expect("wrote the tool config file");
+        ToolConfigFile {
+            tool: tool_name(tool),
+            config_file,
+        }
+    }
+
+    #[test]
+    fn unknown_key_warnings_only_include_fields_the_file_defines() {
+        let dir = tempdir().unwrap();
+        let graph = temp_workspace(
+            &dir,
+            "[profile.ci]\ntest-threads = 2\nrepo-typo = true\nshared-typo = true",
+        );
+        let root = graph.workspace().root();
+        // We must produce a warning for:
+        //
+        // * tool file with tool-typo
+        // * tool file with shared-typo
+        // * repository file with repo-typo
+        // * repository file with shared-typo
+        //
+        // We must NOT warn about repository file with tool-typo. This is true
+        // today because when we deserialize a config file, we do so against the
+        // default config, not in a layered fashion.
+        let tool = tool_config_file(
+            &dir,
+            "tool.toml",
+            "t",
+            "[profile.ci]\nretries = 1\ntool-typo = true\nshared-typo = true",
+        );
+        let tool_path = tool.config_file.clone();
+
+        let mut warnings = TestConfigWarnings::default();
+        NextestConfig::from_sources_with_warnings(
+            root,
+            &ParseContext::new(&graph),
+            None,
+            &[tool],
+            &BTreeSet::new(),
+            &mut warnings,
+        )
+        .expect("config is valid");
+
+        assert_eq!(
+            warnings.unknown_keys,
+            id_hash_map! {
+                UnknownKeys {
+                    kind: ConfigSourceKind::DiscoveredRepository,
+                    config_file: root.join(NextestConfig::CONFIG_PATH),
+                    keys: maplit::btreeset! {
+                        "profile.ci.repo-typo".to_owned(),
+                        "profile.ci.shared-typo".to_owned(),
+                    },
+                },
+                UnknownKeys {
+                    kind: ConfigSourceKind::Tool(tool_name("t")),
+                    config_file: tool_path,
+                    keys: maplit::btreeset! {
+                        "profile.ci.tool-typo".to_owned(),
+                        "profile.ci.shared-typo".to_owned(),
+                    },
+                },
+            },
+            "each file is warned about exactly the unknown keys it wrote"
+        );
+    }
+
+    #[test_case("", Some("test(tool)"), "test(tool)"; "repo config omits the default profile")]
+    #[test_case("[profile.default]\nretries = 1", Some("test(tool)"), "test(tool)"; "repo config sets no default filter")]
+    #[test_case("[profile.default]\ndefault-filter = 'test(repo)'", Some("test(tool)"), "test(repo)"; "repo config sets a default filter")]
+    // With no file setting a default filter, the value can only come from
+    // CompiledByProfile::for_default_config.
+    #[test_case("[profile.default]\nretries = 1", None, "all()"; "no file sets a default filter")]
+    fn default_filter_precedence_between_tool_and_repo_configs(
+        repo_contents: &str,
+        tool_filter: Option<&str>,
+        expected_filter: &str,
+    ) {
+        let dir = tempdir().unwrap();
+        let graph = temp_workspace(&dir, repo_contents);
+        let tool_config_files: Vec<_> = tool_filter
+            .map(|filter| {
+                tool_config_file(
+                    &dir,
+                    "tool.toml",
+                    "t",
+                    &format!("[profile.default]\ndefault-filter = '{filter}'"),
+                )
+            })
+            .into_iter()
+            .collect();
+        let pcx = ParseContext::new(&graph);
+        let config = NextestConfig::from_sources(
+            graph.workspace().root(),
+            &pcx,
+            None,
+            &tool_config_files,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let profile = config
+            .profile(NextestConfig::DEFAULT_PROFILE)
+            .expect("default profile exists")
+            .apply_build_platforms(&build_platforms());
+        let expected_expr = Filterset::parse(
+            expected_filter.to_owned(),
+            &pcx,
+            FiltersetKind::DefaultFilter,
+            &KnownGroups::Unavailable,
+        )
+        .expect("expected filter parses")
+        .compiled;
+        assert_eq!(profile.default_filter().expr, expected_expr);
+        assert_eq!(
+            profile.default_filter().profile,
+            NextestConfig::DEFAULT_PROFILE
+        );
+        assert!(
+            matches!(
+                profile.default_filter().section,
+                CompiledDefaultFilterSection::Profile
+            ),
+            "{:?}",
+            profile.default_filter().section
+        );
+    }
+
+    #[test]
+    fn default_config_sets_default_filter_only_on_the_default_profile() {
+        let default_config = NextestConfig::default_config("foo");
+
+        let built_in = NextestConfig::make_default_config()
+            .build()
+            .expect("the built-in config builds");
+        let filter = built_in
+            .get::<String>(DEFAULT_PROFILE_DEFAULT_FILTER_KEY)
+            .expect("the built-in default profile sets a default-filter");
+
+        // The default filter defined in configuration must agree with
+        // CompiledDefaultFilter::for_default_config, which hardcodes
+        // CompiledExpr::ALL. (Why we don't just use the default filter is
+        // complicated, having to do with not passing around a PackageGraph
+        // unless necessary.)
+        let dir = tempdir().unwrap();
+        let graph = temp_workspace(&dir, "");
+        let compiled = Filterset::parse(
+            filter,
+            &ParseContext::new(&graph),
+            FiltersetKind::DefaultFilter,
+            &KnownGroups::Unavailable,
+        )
+        .expect("the built-in default-filter parses")
+        .compiled;
+        assert_eq!(compiled, CompiledExpr::ALL);
+
+        let names: Vec<&str> = default_config
+            .inner
+            .other_profiles()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["default-miri"]);
+        for (name, profile) in default_config.inner.other_profiles() {
+            assert_eq!(
+                profile.default_filter(),
+                None,
+                "built-in profile {name} sets no default-filter"
+            );
+        }
+    }
+}

@@ -1,0 +1,225 @@
+site_name: cargo-nextest
+site_url: https://nexte.st
+site_description: "A next-generation test runner for Rust."
+
+repo_url: https://github.com/nextest-rs/nextest
+repo_name: nextest-rs/nextest
+edit_uri: edit/main/site/src/
+
+docs_dir: src
+site_dir: output
+
+theme:
+    name: material
+    custom_dir: overrides
+    icon:
+        logo: material/format-list-checks
+    favicon: static/favicon-32.png
+    features:
+        - navigation.tabs
+        - navigation.sections
+        - navigation.footer
+        - navigation.instant
+        - navigation.instant.prefetch
+        - navigation.instant.progress
+        # Makes "summarized/full" and "colorized/plaintext" tabs linked
+        - content.tabs.link
+        - content.code.copy
+        - content.action.edit
+        - content.action.view
+        - search.highlight
+    palette:
+        # Palette toggle for automatic mode
+        - media: "(prefers-color-scheme)"
+          toggle:
+              icon: material/brightness-auto
+              name: Switch to light mode
+        # Palette toggle for light mode
+        - media: "(prefers-color-scheme: light)"
+          scheme: default
+          primary: custom
+          accent: custom
+          toggle:
+              icon: material/brightness-7
+              name: Switch to dark mode
+
+        # Palette toggle for dark mode
+        - media: "(prefers-color-scheme: dark)"
+          scheme: slate
+          primary: custom
+          accent: custom
+          toggle:
+              icon: material/brightness-4
+              name: Switch to system preference
+
+plugins:
+    - git-revision-date-localized:
+          enabled: !ENV [GIT_REVISION_DATE_ENABLED, true]
+          enable_creation_date: true
+    - macros
+    - markdown-exec
+    - search
+    - social:
+          cards_layout_dir: layouts
+          cards_layout: custom
+
+extra:
+    # **Rust MSRV**. Update at release time.
+    msrv: "1.91"
+    status:
+        experimental: "Experimental: not stable yet"
+        new: Recently added
+
+extra_css:
+    - fonts/inter.css
+    - theme/css/extra.css
+
+extra_javascript:
+    - theme/js/hero-install.js
+
+validation:
+    links:
+        # This ext.shortcodes emit page-independent links like
+        # `/changelog.md#0.9.66`, which MkDocs then resolves and validates like
+        # relative links.
+        absolute_links: relative_to_docs
+
+nav:
+    - "Home": index.md
+    - "About":
+          - "Get started":
+                - "Pre-built binaries": docs/installation/pre-built-binaries.md
+                - docs/installation/from-source.md
+                - docs/installation/updating.md
+                - docs/installation/release-urls.md
+          - "Platform-specific notes":
+                - docs/installation/windows.md
+                - docs/installation/macos.md
+          - "Benchmarks": docs/benchmarks/index.md
+          - "Stability policy": docs/stability/index.md
+          - docs/contributing.md
+          - changelog.md
+    - "Usage":
+          - docs/running.md
+          - docs/selecting.md
+          - docs/listing.md
+          - docs/reporting.md
+          - docs/features/retries.md
+          - docs/features/slow-tests.md
+          - "Record, replay and rerun":
+                - "Overview": docs/features/record-replay-rerun/index.md
+                - "Rerunning failed tests": docs/features/record-replay-rerun/rerun.md
+                - "Replaying test runs": docs/features/record-replay-rerun/replay.md
+                - "Portable recordings": docs/features/record-replay-rerun/portable-recordings.md
+                - "Perfetto traces": docs/features/record-replay-rerun/perfetto-chrome-traces.md
+                - "Managing recorded runs": docs/features/record-replay-rerun/managing-runs.md
+          - "More features":
+                - docs/features/leaky-tests.md
+                - docs/features/stress-tests.md
+                - docs/features/target-runners.md
+                - docs/ci-features/archiving.md
+                - "Partitioning and sharding runs": docs/ci-features/partitioning.md
+                - docs/features/benchmarks.md
+          - "Filterset DSL":
+                - "About filtersets": docs/filtersets/index.md
+                - "DSL reference": docs/filtersets/reference.md
+          - docs/glossary.md
+    - "Configuration":
+          - "Configuring nextest": docs/configuring-nextest.md
+          - "Repository config":
+                - "Repository configuration": docs/configuration/index.md
+                - "Configuration reference": docs/configuration/reference.md
+                - docs/configuration/per-test-overrides.md
+                - "Specifying platforms": docs/configuration/specifying-platforms.md
+                - "Minimum versions": docs/configuration/minimum-versions.md
+                - "Test priorities": docs/configuration/test-priorities.md
+                - "Heavy tests": docs/configuration/threads-required.md
+                - "Mutual exclusion and rate-limiting": docs/configuration/test-groups.md
+                - "Environment variables": docs/configuration/env-vars.md
+                - "Extra arguments": docs/configuration/extra-args.md
+                - docs/configuration/setup-scripts.md
+                - docs/configuration/wrapper-scripts.md
+          - "User config":
+                - "User configuration": docs/user-config/index.md
+                - "Pager support": docs/user-config/pager.md
+                - "User config reference": docs/user-config/reference.md
+    - "Integrations":
+          - "Overview": docs/integrations/index.md
+          - "Editors and IDEs":
+                - "Visual Studio Code": docs/integrations/vscode.md
+                - "RustRover": docs/integrations/rustrover.md
+          - docs/integrations/test-coverage.md
+          - "Miri interpreter": docs/integrations/miri.md
+          - "Debuggers and tracers": docs/integrations/debuggers-tracers.md
+          - docs/integrations/criterion.md
+          - "cargo-mutants": docs/integrations/cargo-mutants.md
+          - docs/integrations/usdt.md
+          - "Machine-readable output":
+                - "About output formats": docs/machine-readable/index.md
+                - "JUnit support": docs/machine-readable/junit.md
+                - "Test and binary lists": docs/machine-readable/list.md
+                - docs/machine-readable/libtest-json.md
+    - "Design":
+          - docs/design/how-it-works.md
+          - docs/design/why-process-per-test.md
+          - docs/design/custom-test-harnesses.md
+          - "Architecture":
+                - "The runner loop": docs/design/architecture/runner-loop.md
+                - "Signal handling": docs/design/architecture/signal-handling.md
+                - "Input handling": docs/design/architecture/input-handling.md
+                - docs/design/architecture/recording-runs.md
+
+markdown_extensions:
+    # Python Markdown
+    - abbr
+    - admonition
+    - attr_list
+    - def_list
+    - footnotes
+    - md_in_html
+    - toc:
+          permalink: true
+          slugify: !!python/object/apply:ext.slugs.slugify
+              kwds:
+                  case: lower
+
+    # Python Markdown Extensions
+    - pymdownx.arithmatex:
+          generic: true
+    - pymdownx.betterem:
+          smart_enable: all
+    - pymdownx.caret
+    - pymdownx.details
+    - pymdownx.emoji:
+          emoji_index: !!python/name:material.extensions.emoji.twemoji
+          emoji_generator: !!python/name:material.extensions.emoji.to_svg
+    - pymdownx.highlight
+    - pymdownx.inlinehilite
+    - pymdownx.keys
+    - pymdownx.mark
+    - pymdownx.snippets:
+          # Paths are relative to the cwd (site/), so this is the repo root. The
+          # included reference docs live in other crates because `cargo nextest
+          # help` renders them too.
+          base_path:
+              - ".."
+          check_paths: true
+    - pymdownx.smartsymbols:
+          ordinal_numbers: false
+    - pymdownx.superfences:
+          custom_fences:
+              - name: mermaid
+                class: mermaid
+                format: !!python/name:pymdownx.superfences.fence_code_format
+    - pymdownx.tabbed:
+          alternate_style: true
+          slugify: !!python/object/apply:pymdownx.slugs.slugify
+              kwds:
+                  case: lower
+    - pymdownx.tasklist:
+          custom_checkbox: true
+    - pymdownx.tilde
+    - mdx_truly_sane_lists
+
+    # Local extensions
+    - ext.shortcodes

@@ -1,0 +1,5 @@
+# Disable CRLF conversions on Windows.
+* -text
+
+# Set syntax highlighting on GitHub.
+ fixtures/fixture-project/.cargo/config linguist-language=toml
