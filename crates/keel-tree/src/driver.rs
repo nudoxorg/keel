@@ -22,6 +22,8 @@ struct ManifestCase {
     id: String,
     node: String,
     language: String,
+    #[serde(default)]
+    requires: Vec<String>,
     steps: Vec<ManifestStep>,
 }
 #[derive(Deserialize)]
@@ -64,6 +66,8 @@ struct CaseReceipt {
 struct StepReceipt {
     id: String,
     status: String,
+    #[serde(default)]
+    blocked_by: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -80,6 +84,15 @@ pub struct CheckEvidence {
     pub state: String,
     #[serde(default)]
     pub blocked_by: Option<String>,
+    #[serde(default)]
+    pub blocked_by_cases: Vec<String>,
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CaseOutcome {
+    pub state: String,
+    pub definition_sha256: String,
+    #[serde(default)]
+    pub blocked_by_cases: Vec<String>,
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Evidence {
@@ -98,6 +111,8 @@ pub struct Evidence {
     pub failed_worlds: BTreeMap<String, String>,
     #[serde(default)]
     pub world_definitions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub case_outcomes: BTreeMap<String, CaseOutcome>,
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -145,6 +160,8 @@ pub fn evaluate(
     let mut verified = false;
     let mut failed_worlds = BTreeMap::new();
     let mut receipts: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut blocked_cases: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut case_outcomes = BTreeMap::new();
     let mut case_inputs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut case_artifacts: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     if let (Some(manifest_path), Some(report_path)) = (manifest_path, report_path) {
@@ -332,6 +349,38 @@ pub fn evaluate(
             {
                 bail!("case {} step identities differ from manifest", receipt.id);
             }
+            let mut seen_dependencies = BTreeSet::new();
+            let mut blockers = Vec::new();
+            for dependency in &case.requires {
+                if !seen_dependencies.insert(dependency) || dependency == &receipt.id {
+                    bail!("case {} has invalid prerequisites", receipt.id);
+                }
+                match receipts.get(dependency) {
+                    Some(&"pass") => {}
+                    Some(&"fail" | &"blocked") => blockers.push(dependency.clone()),
+                    Some(_) => bail!("invalid prerequisite status for {dependency}"),
+                    None => bail!(
+                        "case {} precedes or omits prerequisite {dependency}",
+                        receipt.id
+                    ),
+                }
+            }
+            let valid_blocked = receipt.status == "blocked"
+                && !case.steps.is_empty()
+                && !blockers.is_empty()
+                && receipt.steps.len() == case.steps.len()
+                && receipt.steps.iter().all(|step| {
+                    step.status == "blocked"
+                        && step
+                            .blocked_by
+                            .as_ref()
+                            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+                            .as_ref()
+                            == Some(&blockers)
+                });
+            if receipt.status != "blocked" && !blockers.is_empty() {
+                bail!("case {} ran despite a failed prerequisite", receipt.id);
+            }
             let valid_pass = receipt.status == "pass"
                 && receipt.steps.len() == case.steps.len()
                 && receipt.steps.iter().all(|s| s.status == "pass");
@@ -340,13 +389,28 @@ pub fn evaluate(
                     .steps
                     .iter()
                     .all(|s| ["pass", "fail", "blocked"].contains(&s.status.as_str()));
-            if !valid_pass && !valid_fail {
+            if !valid_pass && !valid_fail && !valid_blocked {
                 bail!("case {} has inconsistent status", receipt.id);
             }
-            if receipts
-                .insert(receipt.id.clone(), if valid_pass { "pass" } else { "fail" })
-                .is_some()
-            {
+            let state = if valid_pass {
+                "pass"
+            } else if valid_fail {
+                "fail"
+            } else {
+                "blocked"
+            };
+            if valid_blocked {
+                blocked_cases.insert(receipt.id.clone(), blockers.clone());
+            }
+            case_outcomes.insert(
+                receipt.id.clone(),
+                CaseOutcome {
+                    state: state.to_owned(),
+                    definition_sha256: definitions[&receipt.id].clone(),
+                    blocked_by_cases: blockers,
+                },
+            );
+            if receipts.insert(receipt.id.clone(), state).is_some() {
                 bail!("duplicate receipt {}", receipt.id);
             }
         }
@@ -389,6 +453,13 @@ pub fn evaluate(
                     bail!("multiple checks bind driver case {id}");
                 }
             }
+            let blocked_by_cases = if verified {
+                case.and_then(|id| blocked_cases.get(id))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let mut blocked_by = None;
             let mut cursor = cell.world.as_deref();
             let mut visited = BTreeSet::new();
@@ -449,6 +520,7 @@ pub fn evaluate(
                 }
                 .to_owned(),
                 blocked_by,
+                blocked_by_cases,
             });
         }
     }
@@ -481,6 +553,11 @@ pub fn evaluate(
         checks,
         roots,
         failed_worlds,
+        case_outcomes: if verified {
+            case_outcomes
+        } else {
+            BTreeMap::new()
+        },
         world_definitions: model
             .worlds
             .iter()

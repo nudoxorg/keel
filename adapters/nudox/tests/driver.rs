@@ -342,3 +342,144 @@ fn cgroup_contains_a_descendant_that_creates_a_new_session() {
         .count();
     assert_eq!(entries, 0, "owned scopes removed after timeout");
 }
+
+#[test]
+fn actual_blocked_case_receipts_reach_tree_and_judge() {
+    use keel_tree::{
+        driver, model::Model, resolve::Resolution, source, testset::TestTable, tree, verdict,
+    };
+    use sha2::{Digest, Sha256};
+    let world = Sandbox::new();
+    let mut base = process_case("foundation", "echo '{\"answer\":\"wrong\"}'");
+    base["node"] = json!("foundation");
+    let child = json!({"id":"dependent","node":"surface","language":"protocol","daemon":false,"requires":["foundation"],"steps":[{"id":"must-not-run","kind":"write","files":{"sentinel":"unexpected"}}]});
+    let manifest = manifest(vec![base.clone(), child.clone()]);
+    let result = world.invoke(&manifest, &[]);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(world.report()["cases"][1]["status"], "blocked");
+    let case_hash =
+        |case: &Value| format!("{:x}", Sha256::digest(serde_json::to_vec(case).unwrap()));
+    let model = Model::from_json(&json!({"schema":2,"nodes":[
+        {"id":"foundation","at":"fixture","parent":null,"about":null,"ship":null},
+        {"id":"surface","at":"fixture","parent":null,"about":null,"ship":"required","on":["foundation"]}],
+        "checks":{"contract":{"checks":[
+            {"cell":"foundation","on":["foundation"],"run":["keel-case","foundation"],"expect":{"definitionSha256":case_hash(&base)}},
+            {"cell":"dependent","on":["surface"],"run":["keel-case","dependent"],"expect":{"definitionSha256":case_hash(&child)}}]}}}).to_string()).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .arg(&world.0)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&world.0)
+            .args(["add", "manifest.json"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (index, _) = source::load(&world.0, None, false).unwrap();
+    let res = Resolution::build_with(&model, &index, &world.0, Some("fixture"));
+    let evidence = driver::evaluate(
+        &model,
+        &res,
+        Some(&world.0.join("manifest.json")),
+        Some(&world.0.join("evidence/report.json")),
+        Some(&world.0.join("bins")),
+        Some(std::path::Path::new(env!(
+            "CARGO_BIN_EXE_backend-keel-harness"
+        ))),
+    )
+    .unwrap();
+    assert_eq!(
+        evidence
+            .checks
+            .iter()
+            .find(|c| c.case.as_deref() == Some("foundation"))
+            .unwrap()
+            .state,
+        "fail"
+    );
+    assert_eq!(
+        evidence
+            .checks
+            .iter()
+            .find(|c| c.case.as_deref() == Some("dependent"))
+            .unwrap()
+            .state,
+        "blocked"
+    );
+    let mut forged = world.report();
+    forged["cases"][1]["steps"][0]["blocked_by"] = json!(["not-the-prerequisite"]);
+    let forged_path = world.0.join("forged.json");
+    fs::write(&forged_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert!(
+        driver::evaluate(
+            &model,
+            &res,
+            Some(&world.0.join("manifest.json")),
+            Some(&forged_path),
+            Some(&world.0.join("bins")),
+            Some(std::path::Path::new(env!(
+                "CARGO_BIN_EXE_backend-keel-harness"
+            )))
+        )
+        .is_err()
+    );
+    forged = world.report();
+    forged["cases"].as_array_mut().unwrap().remove(0);
+    fs::write(&forged_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert!(
+        driver::evaluate(
+            &model,
+            &res,
+            Some(&world.0.join("manifest.json")),
+            Some(&forged_path),
+            Some(&world.0.join("bins")),
+            Some(std::path::Path::new(env!(
+                "CARGO_BIN_EXE_backend-keel-harness"
+            )))
+        )
+        .is_err()
+    );
+    let mut bad_evidence = evidence.clone();
+    bad_evidence
+        .case_outcomes
+        .get_mut("foundation")
+        .unwrap()
+        .state = "pass".to_owned();
+    assert!(keel_judge::checks::validate(&bad_evidence).is_err());
+    let unverified = driver::evaluate(
+        &model,
+        &res,
+        Some(&world.0.join("manifest.json")),
+        Some(&world.0.join("evidence/report.json")),
+        Some(&world.0.join("bins")),
+        None,
+    )
+    .unwrap();
+    assert!(unverified.checks.iter().all(|c| c.state == "unknown"));
+    let table = TestTable::build(&res, false);
+    let trees = tree::run(&res, &table, None).unwrap();
+    let results = verdict::Results {
+        seen: vec![None; table.len()],
+        lines: 0,
+        mapped: 0,
+        unmapped: vec![],
+        failures_only: false,
+    };
+    let value = verdict::run_with_checks(&res, &table, &trees, &results, Some(&evidence));
+    assert_eq!(value.features[0].state, "failure");
+    assert_eq!(value.features[0].roots, vec![("foundation".to_owned(), 1)]);
+    let verdict_file = world.0.join("tree.json");
+    fs::write(&verdict_file, serde_json::to_vec(&value).unwrap()).unwrap();
+    keel_judge::checks::record(&verdict_file, &world.0.join("judge")).unwrap();
+    let saved = keel_judge::checks::latest(&world.0.join("judge"))
+        .unwrap()
+        .unwrap();
+    assert_eq!((saved.fail, saved.blocked, saved.unknown), (1, 1, 0));
+}

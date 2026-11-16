@@ -221,6 +221,7 @@ pub fn run_with_checks(res: &Resolution<'_>, table: &TestTable, trees: &[Feature
             let mut counts = CheckCounts::default();
             let mut failures: BTreeMap<String, u64> = BTreeMap::new();
             let mut worlds: BTreeMap<String, u64> = BTreeMap::new();
+            let mut external_cases: BTreeMap<String, u64> = BTreeMap::new();
             for check in &evidence.checks {
                 if !check.nodes.iter().any(|n| res.node_index(n).is_some_and(|i| cone_nodes.contains(&i))) { continue; }
                 match check.state.as_str() {
@@ -236,6 +237,18 @@ pub fn run_with_checks(res: &Resolution<'_>, table: &TestTable, trees: &[Feature
                     "blocked" => {
                         counts.blocked += 1;
                         if let Some(world) = &check.blocked_by { *worlds.entry(world.clone()).or_default() += 1; }
+                        let mut pending = check.blocked_by_cases.clone();
+                        let mut seen = std::collections::BTreeSet::new();
+                        while let Some(case) = pending.pop() {
+                            if !seen.insert(case.clone()) { continue; }
+                            if let Some(outcome) = evidence.case_outcomes.get(&case) {
+                                if outcome.state == "blocked" { pending.extend(outcome.blocked_by_cases.iter().cloned()); }
+                                else if outcome.state == "fail" {
+                                    let mapped = evidence.checks.iter().any(|c| c.case.as_deref() == Some(&case) && c.state == "fail" && c.nodes.iter().any(|node| res.node_index(node).is_some_and(|i| cone_nodes.contains(&i))));
+                                    if !mapped { *external_cases.entry(case).or_default() += 1; }
+                                }
+                            }
+                        }
                     },
                     _ => counts.unknown += 1,
                 }
@@ -260,6 +273,7 @@ pub fn run_with_checks(res: &Resolution<'_>, table: &TestTable, trees: &[Feature
                     line.role = Some(if under.is_empty() { Role::Root } else { Role::StandsOnFailing(under) });
                 }
                 for (world, count) in worlds { f.roots.push((format!("world:{world}"), count)); }
+                for (case, count) in external_cases { f.roots.push((format!("case:{case}"), count)); }
             } else if counts.unknown > 0 || (f.cone.tests > 0 && f.cone.pass == 0) {
                 f.state = "unknown";
             } else if counts.pass > 0 {

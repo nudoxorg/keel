@@ -68,6 +68,43 @@ pub fn validate(e: &Evidence) -> Result<()> {
             bail!("unbound failed world {world}");
         }
     }
+    if !e.case_outcomes.is_empty()
+        && !(e.artifacts_verified && e.driver_verified && e.manifest_sha256.is_some())
+    {
+        bail!("unverified case outcomes");
+    }
+    for (id, outcome) in &e.case_outcomes {
+        if id.is_empty()
+            || !valid_hash(&outcome.definition_sha256)
+            || !["pass", "fail", "blocked"].contains(&outcome.state.as_str())
+        {
+            bail!("invalid case outcome {id}");
+        }
+    }
+    for (id, outcome) in &e.case_outcomes {
+        if (outcome.state == "blocked") != !outcome.blocked_by_cases.is_empty() {
+            bail!("invalid case blockers for {id}");
+        }
+        let mut pending = outcome.blocked_by_cases.clone();
+        let mut seen = BTreeSet::new();
+        while let Some(dependency) = pending.pop() {
+            if dependency == *id {
+                bail!("cyclic case dependency for {id}");
+            }
+            if !seen.insert(dependency.clone()) {
+                continue;
+            }
+            let prior = e
+                .case_outcomes
+                .get(&dependency)
+                .with_context(|| format!("missing case prerequisite {dependency}"))?;
+            match prior.state.as_str() {
+                "fail" => {}
+                "blocked" => pending.extend(prior.blocked_by_cases.iter().cloned()),
+                _ => bail!("case {id} names a passing prerequisite as blocked"),
+            }
+        }
+    }
     let mut ids = BTreeSet::new();
     for c in &e.checks {
         if c.id.is_empty() || !ids.insert(&c.id) {
@@ -84,7 +121,7 @@ pub fn validate(e: &Evidence) -> Result<()> {
             bail!("invalid identity for {}", c.id);
         }
         match c.state.as_str() {
-            "unknown" if c.blocked_by.is_none() => {}
+            "unknown" if c.blocked_by.is_none() && c.blocked_by_cases.is_empty() => {}
             "pass" | "fail"
                 if e.artifacts_verified
                     && e.driver_verified
@@ -93,15 +130,42 @@ pub fn validate(e: &Evidence) -> Result<()> {
                     && c.definition_sha256.is_some()
                     && !c.artifacts.is_empty()
                     && c.blocked_by.is_none()
+                    && c.blocked_by_cases.is_empty()
+                    && (e.case_outcomes.is_empty()
+                        || c.case
+                            .as_ref()
+                            .and_then(|id| e.case_outcomes.get(id))
+                            .is_some_and(|outcome| {
+                                outcome.state == c.state
+                                    && Some(outcome.definition_sha256.as_str())
+                                        == c.definition_sha256.as_deref()
+                            }))
                     && c.artifacts
                         .iter()
                         .all(|(k, v)| e.artifacts.get(k) == Some(v)) => {}
             "blocked"
                 if e.artifacts_verified
                     && e.driver_verified
-                    && c.blocked_by
-                        .as_ref()
-                        .is_some_and(|w| e.failed_worlds.contains_key(w)) => {}
+                    && ((c.blocked_by_cases.is_empty()
+                        && c.blocked_by
+                            .as_ref()
+                            .is_some_and(|w| e.failed_worlds.contains_key(w)))
+                        || (c.blocked_by.is_none()
+                            && !c.blocked_by_cases.is_empty()
+                            && c.case
+                                .as_ref()
+                                .and_then(|id| e.case_outcomes.get(id))
+                                .is_some_and(|o| {
+                                    o.state == "blocked"
+                                        && Some(o.definition_sha256.as_str())
+                                            == c.definition_sha256.as_deref()
+                                        && o.blocked_by_cases == c.blocked_by_cases
+                                })
+                            && c.blocked_by_cases.iter().all(|id| {
+                                e.case_outcomes
+                                    .get(id)
+                                    .is_some_and(|o| o.state == "fail" || o.state == "blocked")
+                            }))) => {}
             _ => bail!("unbound or inconsistent outcome for {}", c.id),
         }
     }
