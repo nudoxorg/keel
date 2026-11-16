@@ -348,10 +348,16 @@ impl Manifest {
                         if step.kind == "mcp-call"
                             && (!sessions.contains(&step.session)
                                 || (step.call.is_some() == !step.tool.is_empty())
+                                || (step.call.is_some()
+                                    && !step.arguments.is_null()
+                                    && !step
+                                        .arguments
+                                        .as_object()
+                                        .is_some_and(serde_json::Map::is_empty))
                                 || e.exit != 0)
                         {
                             return Err(format!(
-                                "{}: call needs a live session and exactly one copied call or tool",
+                                "{}: call needs a live session, one copied call or tool, and no additional copied-call arguments",
                                 step.id
                             ));
                         }

@@ -693,6 +693,7 @@ done
     for steps in [
         json!([{"id":"call","kind":"mcp-call","session":"missing","tool":"x","arguments":{},"expect":{"exit":0,"json":[{"pointer":"/x","equals":1}]}}]),
         json!([{"id":"stop","kind":"mcp-stop","session":"missing"}]),
+        json!([{"id":"open","kind":"mcp-start","session":"s"},{"id":"bad","kind":"mcp-call","session":"s","call":{"name":"next","arguments":{}},"arguments":{"limit":5},"expect":{"exit":0,"json":[{"pointer":"/x","equals":1}]}},{"id":"close","kind":"mcp-stop","session":"s"}]),
         json!([{"id":"open","kind":"mcp-start","session":"s"}]),
         json!([{"id":"open","kind":"mcp-start","session":"s"},{"id":"again","kind":"mcp-start","session":"s"},{"id":"close","kind":"mcp-stop","session":"s"}]),
     ] {
