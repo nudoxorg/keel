@@ -1,0 +1,9 @@
+---
+source: integration-tests/tests/integration/record_replay.rs
+expression: "redact_dynamic_fields(&list_output.stdout_as_str(), temp_root)"
+---
+1 recorded run:
+
+  60000001  XXXX-XX-XX XX:XX:XX  <duration>     <size>  5 passed iterations  *latest
+                                             ─────────
+                                                <size>

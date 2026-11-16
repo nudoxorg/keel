@@ -1,0 +1,75 @@
+---
+icon: octicons/gear-24
+sidebar_icon: false
+description: Writing custom test harnesses that work with nextest, using libtest-mimic or through manual implementation.
+---
+
+# Custom test harnesses
+
+A custom test harness is defined in `Cargo.toml` as:
+
+```toml
+[[test]]
+name = "my-test"
+harness = false
+```
+
+As mentioned in [_Nextest's execution model_](how-it-works.md), cargo-nextest has a much thicker interface with the test harness than cargo test does. If you don't use any custom harnesses, cargo-nextest will run out of the box. However, custom test harnesses need to follow certain rules in order to work with nextest.
+
+## libtest-mimic (recommended)
+
+Nextest is compatible with custom test harnesses based on [libtest-mimic](https://github.com/LukasKalbertodt/libtest-mimic), version 0.4.0, or 0.5.2 or above (note that 0.5.0 and 0.5.1 have [a regression](https://github.com/nextest-rs/datatest-stable/pull/5)). Using this crate is recommended.
+
+### Example: datatest-stable
+
+For a test harness based on libtest-mimic, see [datatest-stable](https://github.com/nextest-rs/datatest-stable). This harness implements _data-driven tests_.
+
+- datatest-stable can be used out of the box if each test is specified by a file within a particular directory on disk. For example, it is used by the [Move smart contract language](https://github.com/move-language/move) for many of its internal tests. With [these tests](https://github.com/move-language/move/tree/dfd7cf14a32f8182ddd9f39e9da086c29cb20b7b/language/move-ir-compiler/transactional-tests/tests/bytecode-generation/declarations), the harness is used to verify that each `.mvir` input results in the `.exp` output.
+- datatest-stable also serves as an example for how to write your own custom test harness, if you need to.
+
+## Manually implementing a test harness
+
+For your test harness to work with nextest, follow these rules (keywords are as in [RFC 2119]):
+
+[RFC 2119]: https://datatracker.ietf.org/doc/html/rfc2119
+
+- **The test harness MUST support being run with `--list --format terse`.** This command MUST print to standard out either of the following two options:
+  - all tests; or,
+  - all non-ignored tests (however the harness defines ignored tests).
+  
+  Each test must be printed out on a separate line. Each line must be of the form:
+
+  ```
+  <TEST_NAME>: test
+  ```
+  or
+
+  ```
+  <TEST_NAME>: benchmark
+  ```
+
+  Some examples of valid output:
+
+  ```
+  my_test_1: test
+  my-test-2.txt: test
+  my_module::my_bench_1: benchmark
+  ```
+
+  Other output, such as empty lines or debugging output, MUST NOT be written to standard out. (It is okay to send debugging output to standard error.)
+
+  Custom test harnesses that are meant to be run as a single unit MUST write exactly one line to standard out.
+
+- **The test harness MUST support being run with `--list --format terse --ignored`**. This command MUST print to standard out exactly the set of ignored tests (however the harness defines them) in the same format as above. If there are no ignored tests or if the test harness doesn't support ignored tests, the output MUST be empty. The set of ignored tests MUST be either of the following two options:
+  - A subset of the tests printed out without `--ignored`; this is what libtest does.
+  - A completely disjoint set of tests from those printed out without `--ignored`.
+- **Test names that are not at the top level (however the harness defines this) SHOULD be returned as `path::to::test::test_name`.** This is recommended because the cargo-nextest UI uses `::` as a separator to format test names nicely.
+- **The test harness MUST support being run with `<test-name> --nocapture --exact`**. This command will be called with every test name provided by the harness in `--list` above.
+- **The test harness SHOULD be able to efficiently identify single tests specified with --exact.** This is particularly relevant in cases where discovering the list of tests is expensive. This can lead to a quadratic performance issue: if there are N tests in your custom test harness, nextest will run your test harness N times, leading to O(N²) behavior.
+
+  Some examples:
+
+  - [datatest-stable](https://github.com/nextest-rs/datatest-stable) switches to a more efficient mode when run with `--exact`, where it determines the name of the file to test with by parsing the test name. This is implemented in [datatest-stable PR #49](https://github.com/nextest-rs/datatest-stable/pull/49).
+  - The default Rust libtest harness switches from a linear search to a binary search when run with `--exact`. The wall-clock improvement is significant when [running tests under the Miri interpreter](../integrations/miri.md). This is implemented in [rust-lang/rust PR #154865](https://github.com/rust-lang/rust/pull/154865).
+
+- <!-- md:version 0.9.117 --> **For test names ending with `: benchmark`, the harness MUST support running them with `<test-name> --nocapture --exact --bench`.** This enables benchmarks [to be run](../features/benchmarks.md) via `cargo nextest bench`.

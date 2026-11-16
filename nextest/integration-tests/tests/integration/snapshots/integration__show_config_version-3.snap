@@ -1,0 +1,9 @@
+---
+source: integration-tests/tests/integration/main.rs
+expression: output.stdout_as_str()
+---
+current nextest version: 0.9.54
+version requirements:
+    - required: 0.9.54 (from .config/nextest.toml)
+    - recommended: 0.9.56 (from .config/nextest.toml)
+evaluation result: does not meet recommended version

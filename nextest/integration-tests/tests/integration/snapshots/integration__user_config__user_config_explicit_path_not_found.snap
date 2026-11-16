@@ -1,0 +1,5 @@
+---
+source: integration-tests/tests/integration/user_config.rs
+expression: error_line
+---
+error: user config file not found at /nonexistent/path/to/config.toml

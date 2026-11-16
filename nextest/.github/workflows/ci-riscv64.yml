@@ -1,0 +1,45 @@
+# Note: this runner is provided externally, so we minimize its access to
+# secrets.
+on:
+  # riscv64 CI is currently disabled on push since it's been failing
+  # consistently. Restore the push trigger below to re-enable it.
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # No pull_request (this should be safe, but the number of runners is limited
+  # so we limit it to pushes only.)
+
+name: CI (riscv64)
+
+permissions:
+  contents: read
+  # No permissions to secrets.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: -D warnings
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: [self-hosted, linux, riscv64]
+    # This is in its own separate environment.
+    environment: riscv64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build all targets
+        run: cargo build --all-targets
+      - name: Test with locally built nextest
+        run: cargo local-nt run --profile ci

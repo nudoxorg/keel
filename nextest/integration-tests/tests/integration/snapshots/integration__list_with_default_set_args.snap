@@ -1,0 +1,5 @@
+---
+source: integration-tests/tests/integration/main.rs
+expression: with_args_output.stdout_as_str()
+---
+fixture-project::basic test_stdin_closed

@@ -1,0 +1,48 @@
+---
+source: integration-tests/tests/integration/main.rs
+expression: output.stderr_as_str()
+---
+info: experimental features enabled: setup-scripts, wrapper-scripts, benchmarks
+  error: operator didn't match any binary names
+   ╭────
+ 1 │ binary(unknown) & binary_id(unknown) & binary(=unknown) | binary_id(=unknown)
+   ·        ───┬───
+   ·           ╰── no binary names matched this
+   ╰────
+
+  error: operator didn't match any binary IDs
+   ╭────
+ 1 │ binary(unknown) & binary_id(unknown) & binary(=unknown) | binary_id(=unknown)
+   ·                             ───┬───
+   ·                                ╰── no binary IDs matched this
+   ╰────
+
+  error: operator didn't match any binary names
+   ╭────
+ 1 │ binary(unknown) & binary_id(unknown) & binary(=unknown) | binary_id(=unknown)
+   ·                                               ────┬───
+   ·                                                   ╰── no binary names matched this
+   ╰────
+
+  error: operator didn't match any binary IDs
+   ╭────
+ 1 │ binary(unknown) & binary_id(unknown) & binary(=unknown) | binary_id(=unknown)
+   ·                                                                     ────┬───
+   ·                                                                         ╰── no binary IDs matched this
+   ╰────
+
+  error: operator didn't match any binary IDs
+   ╭────
+ 1 │ binary_id(fixture-project::does_not_exist) | binary_id(=fixture-project::basic)
+   ·           ───────────────┬───────────────
+   ·                          ╰── no binary IDs matched this
+   ╰────
+
+  error: operator didn't match any binary IDs
+   ╭────
+ 1 │ binary_id(fixture-project::example/*) | binary_id(dylib-test::example/*)
+   ·                                                   ──────────┬──────────
+   ·                                                             ╰── no binary IDs matched this
+   ╰────
+
+error: failed to parse filterset

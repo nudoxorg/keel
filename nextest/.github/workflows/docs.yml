@@ -1,0 +1,82 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+name: Docs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  docs:
+    name: Build and deploy documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The full history is required to make mkdocs' git-revision-date-localized plugin work
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      # We don't use rust-cache here on purpose. `cargo doc` doesn't benefit
+      # much from it, and Renovate churn and toolchain bumps rotate the key
+      # often enough that most runs missed anyway. This also keeps the
+      # publishing job free of restored artifacts.
+      #
+      # Fetch nextest directly from get.nexte.st rather than via
+      # taiki-e/install-action: docs must reflect the latest release regardless
+      # of any delay in updating the install action.
+      - name: Install nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          # Set enable-cache to false because the "auto" default enables the
+          # cache on GitHub-hosted runners. Like not using Swatinem/rust-cache,
+          # this keeps the publishing job free of restored artifacts.
+          enable-cache: false
+      - name: Build rustdoc
+        run: ./scripts/build-rustdoc.sh
+      - name: Build site
+        run: ./scripts/build-site.sh
+      - name: Organize
+        run: |
+          rm -rf target/gh-pages
+          mv site/output target/gh-pages
+          mv target/doc target/gh-pages/rustdoc
+      # Ensure that a dependency change that causes the number of files to
+      # exceed a threshold fails on the PR rather than on the deploy to main.
+      - name: Check deployment file count
+        run: |
+          count=$(find target/gh-pages -type f | wc -l)
+          echo "Deployment file count: $count (budget 15000, Cloudflare Pages limit 20000)"
+          if [ "$count" -gt 15000 ]; then
+            echo "Largest rustdoc directories:"
+            for dir in target/gh-pages/rustdoc/*/; do
+              echo "$(find "$dir" -type f | wc -l) $dir"
+            done | sort -rn | head -10
+            echo "::error::The site has $count files, over the 15000-file budget. Cloudflare Pages rejects deployments above 20000 files. Add the offending crates to EXCLUDE_RE in scripts/build-rustdoc.sh."
+            exit 1
+          fi
+      - name: Publish
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }} # zizmor: ignore[secrets-outside-env]
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }} # zizmor: ignore[secrets-outside-env]
+          command: pages deploy target/gh-pages --project-name=nextest
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

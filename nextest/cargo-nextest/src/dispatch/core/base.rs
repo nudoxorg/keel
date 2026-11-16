@@ -1,0 +1,741 @@
+// Copyright (c) The nextest Contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Base application infrastructure shared by core commands.
+
+use crate::{
+    ExpectedError, Result, ReuseBuildKind,
+    cargo_cli::{CargoBuildSettings, KeelBuildFlags},
+    dispatch::{
+        EarlyArgs,
+        common::ConfigOpts,
+        helpers::{acquire_graph_data, detect_build_platforms, runner_for_target},
+    },
+    helpers::{VersionReqKind, log_version_source},
+    output::{OutputContext, OutputWriter},
+};
+use camino::Utf8PathBuf;
+use guppy::graph::PackageGraph;
+use nextest_filtering::ParseContext;
+use nextest_runner::{
+    build_scope::BuildScope,
+    cargo_config::CargoConfigs,
+    config::core::{
+        ConfigExperimental, ConfigPaths, EarlyProfile, ExperimentalConfig, NextestConfig,
+        NextestVersionConfig, NextestVersionEval, VersionOnlyConfig,
+    },
+    double_spawn::DoubleSpawnInfo,
+    errors::ConfigParseError,
+    list::BinaryList,
+    platform::BuildPlatforms,
+    record::BuildKind,
+    reuse_build::ReuseBuildInfo,
+    target_runner::TargetRunner,
+};
+use owo_colors::OwoColorize;
+use semver::Version;
+use std::{
+    collections::BTreeSet,
+    env::VarError,
+    sync::{Arc, OnceLock},
+};
+use tracing::{Level, info, warn};
+
+/// Base application state shared by core commands (run, list, bench, archive).
+pub(crate) struct BaseApp {
+    pub(crate) output: OutputContext,
+    pub(crate) early_args: EarlyArgs,
+    // TODO: support multiple --target options.
+    pub(crate) build_platforms: BuildPlatforms,
+    pub(crate) cargo_metadata_json: Arc<String>,
+    package_graph: Arc<PackageGraph>,
+    // Potentially remapped workspace root (might not be the same as the graph).
+    pub(crate) workspace_root: Utf8PathBuf,
+    config_paths: ConfigPaths,
+    manifest_path: Option<Utf8PathBuf>,
+    pub(crate) reuse_build: ReuseBuildInfo,
+    build_scope: BuildScope,
+    cargo_settings: CargoBuildSettings,
+    keel_build: Option<KeelBuildFlags>,
+    pub(crate) config_opts: ConfigOpts,
+    pub(crate) current_version: Version,
+
+    pub(crate) cargo_configs: CargoConfigs,
+    double_spawn: OnceLock<DoubleSpawnInfo>,
+    target_runner: OnceLock<TargetRunner>,
+}
+
+impl BaseApp {
+    pub(crate) fn new(
+        output: OutputContext,
+        early_args: EarlyArgs,
+        reuse_build: crate::reuse_build::ReuseBuildOpts,
+        cargo_opts: crate::cargo_cli::CargoOptions,
+        config_opts: ConfigOpts,
+        manifest_path: Option<Utf8PathBuf>,
+        writer: &mut OutputWriter,
+    ) -> Result<Self> {
+        reuse_build.check_experimental(output);
+
+        let reuse_build = reuse_build.process(output, writer)?;
+        let (build_scope, cargo_settings) = cargo_opts.into_parts();
+
+        let cargo_configs = CargoConfigs::new(&cargo_settings.config).map_err(Box::new)?;
+
+        let build_platforms = match reuse_build.binaries_metadata() {
+            Some(kind) => kind.binary_list.rust_build_meta.build_platforms.clone(),
+            None => detect_build_platforms(&cargo_configs, cargo_settings.target.as_deref())?,
+        };
+
+        let (cargo_metadata_json, package_graph) = match reuse_build.cargo_metadata() {
+            Some(m) => (m.json.clone(), m.graph.clone()),
+            None => {
+                let json = acquire_graph_data(
+                    manifest_path.as_deref(),
+                    cargo_settings.target_dir.as_deref(),
+                    &cargo_settings,
+                    &build_platforms,
+                    output,
+                )?;
+                let graph = PackageGraph::from_json(&json)
+                    .map_err(|err| ExpectedError::cargo_metadata_parse_error(None, err))?;
+                (Arc::new(json), Arc::new(graph))
+            }
+        };
+
+        // How `--cargo-metadata` interacts with the build scope.
+        let manifest_path = if reuse_build.cargo_metadata.is_some() {
+            if reuse_build.binaries_metadata.is_some() {
+                // No fresh build (binaries reused): anchor to the workspace root.
+                Some(package_graph.workspace().root().join("Cargo.toml"))
+            } else {
+                // Anchor the build at the metadata's default members.
+                //
+                // This sets only the *package* scope; target (`--lib`/`--test`)
+                // and feature selection still compose with it, and an explicit
+                // `-p` / `--workspace` overrides the package at the manifest
+                // path the usual way.
+                let mut members = package_graph.workspace().default_members();
+                match (members.next(), members.next()) {
+                    // Exactly one default member: build just that one.
+                    (Some(only), None) => Some(only.manifest_path().to_owned()),
+                    // Zero or many. This indicates that this is the default
+                    // member set for the workspace (which could be the whole
+                    // workspace, if workspace.default-members isn't defined in
+                    // Cargo.toml). Anchor the build at the root.
+                    _ => Some(package_graph.workspace().root().join("Cargo.toml")),
+                }
+            }
+        } else {
+            manifest_path
+        };
+
+        let workspace_root = match reuse_build.workspace_remap() {
+            Some(path) => path.to_owned(),
+            _ => package_graph.workspace().root().to_owned(),
+        };
+
+        let root_manifest_path = workspace_root.join("Cargo.toml");
+        if !root_manifest_path.exists() {
+            // This doesn't happen in normal use, but is a common situation if the build is being
+            // reused.
+            let reuse_build_kind = if reuse_build.workspace_remap().is_some() {
+                ReuseBuildKind::ReuseWithWorkspaceRemap { workspace_root }
+            } else if reuse_build.is_active() {
+                ReuseBuildKind::Reuse
+            } else {
+                ReuseBuildKind::Normal
+            };
+
+            return Err(ExpectedError::RootManifestNotFound {
+                path: root_manifest_path,
+                reuse_build_kind,
+            });
+        }
+
+        let config_paths = ConfigPaths::capture(&workspace_root)?;
+        let current_version = current_version();
+
+        Ok(Self {
+            output,
+            early_args,
+            build_platforms,
+            cargo_metadata_json,
+            package_graph,
+            workspace_root,
+            config_paths,
+            reuse_build,
+            manifest_path,
+            build_scope,
+            cargo_settings,
+            keel_build: None,
+            config_opts,
+            cargo_configs,
+            current_version,
+
+            double_spawn: OnceLock::new(),
+            target_runner: OnceLock::new(),
+        })
+    }
+
+    /// Makes test builds reproducible across checkout paths, as Keel requires.
+    pub(crate) fn with_keel_build(mut self, flags: KeelBuildFlags) -> Self {
+        self.keel_build = Some(flags);
+        self
+    }
+
+    /// Returns the host triple, and the target triple if one was requested.
+    pub(crate) fn keel_triples(&self) -> Vec<String> {
+        let mut triples = vec![self.build_platforms.host.platform.triple_str().to_owned()];
+        if let Some(target) = &self.build_platforms.target {
+            let target = target.triple.platform.triple_str().to_owned();
+            if !triples.contains(&target) {
+                triples.push(target);
+            }
+        }
+        triples
+    }
+
+    pub(crate) fn load_config(
+        &self,
+        pcx: &ParseContext<'_>,
+        required_experimental: &BTreeSet<ConfigExperimental>,
+    ) -> Result<(VersionOnlyConfig, NextestConfig)> {
+        // Load the version-only config first to avoid incompatibilities with parsing the rest of
+        // the config.
+        let version_only_config = self
+            .config_opts
+            .make_version_only_config(&self.config_paths)?;
+        self.check_version_config_initial(version_only_config.nextest_version())?;
+
+        // Check for unknown experimental features after the version check. This ensures that if
+        // the required nextest version is higher than the current version, the version error takes
+        // precedence (a future version may have new experimental features).
+        self.check_experimental_config_initial(version_only_config.experimental())?;
+
+        let mut experimental = ConfigExperimental::from_env();
+        experimental.extend(version_only_config.experimental().known());
+
+        // Check that all required experimental features are enabled.
+        let missing = required_experimental
+            .difference(&experimental)
+            .copied()
+            .collect::<Vec<_>>();
+
+        if !missing.is_empty() {
+            let config_file = match &self.config_opts.config_file {
+                Some(path) => self
+                    .config_paths
+                    .resolve_input(path)
+                    .map_err(ConfigParseError::from)?,
+                None => self.config_paths.shared_config(),
+            };
+            return Err(ExpectedError::ConfigExperimentalFeaturesNotEnabled {
+                config_file,
+                missing,
+            });
+        }
+
+        if !experimental.is_empty() {
+            info!(
+                "experimental features enabled: {}",
+                experimental
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        let config = self.config_opts.make_config(
+            &self.config_paths,
+            pcx,
+            version_only_config.experimental().known(),
+            self.output,
+        )?;
+
+        Ok((version_only_config, config))
+    }
+
+    fn check_version_config_initial(&self, version_cfg: &NextestVersionConfig) -> Result<()> {
+        let styles = self.output.stderr_styles();
+
+        match version_cfg.eval(
+            &self.current_version,
+            self.config_opts.override_version_check,
+        ) {
+            NextestVersionEval::Satisfied => Ok(()),
+            NextestVersionEval::Error {
+                required,
+                current,
+                source,
+            } => Err(ExpectedError::RequiredVersionNotMet {
+                required,
+                current,
+                config_source: source,
+            }),
+            NextestVersionEval::Warn {
+                recommended: required,
+                current,
+                source,
+            } => {
+                warn!(
+                    "this repository recommends nextest version {}, but the current version is {}",
+                    required.style(styles.bold),
+                    current.style(styles.bold),
+                );
+                log_version_source(VersionReqKind::Recommended, &source, styles.config_styles);
+
+                Ok(())
+            }
+            NextestVersionEval::ErrorOverride {
+                required,
+                current,
+                source,
+            } => {
+                info!(
+                    "overriding version check (required: {}, current: {})",
+                    required, current
+                );
+                log_version_source(VersionReqKind::Required, &source, styles.config_styles);
+
+                Ok(())
+            }
+            NextestVersionEval::WarnOverride {
+                recommended,
+                current,
+                source,
+            } => {
+                info!(
+                    "overriding version check (recommended: {}, current: {})",
+                    recommended, current,
+                );
+                log_version_source(VersionReqKind::Recommended, &source, styles.config_styles);
+
+                Ok(())
+            }
+        }
+    }
+
+    fn check_experimental_config_initial(
+        &self,
+        experimental_cfg: &ExperimentalConfig,
+    ) -> Result<()> {
+        // Only the first file's error is surfaced -- this is fine for now since
+        // exactly one config file can carry experimental features. If/when a
+        // second repository file adds support for experimental features, we'll
+        // want to revisit this.
+        if let Some(err) = experimental_cfg.source_errors().next() {
+            Err(err.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn check_version_config_final(
+        &self,
+        version_cfg: &NextestVersionConfig,
+    ) -> Result<()> {
+        let styles = self.output.stderr_styles();
+
+        match version_cfg.eval(
+            &self.current_version,
+            self.config_opts.override_version_check,
+        ) {
+            NextestVersionEval::Satisfied => Ok(()),
+            NextestVersionEval::Error {
+                required,
+                current,
+                source,
+            } => Err(ExpectedError::RequiredVersionNotMet {
+                required,
+                current,
+                config_source: source,
+            }),
+            NextestVersionEval::Warn {
+                recommended: required,
+                current,
+                source,
+            } => {
+                warn!(
+                    "this repository recommends nextest version {}, but the current version is {}",
+                    required.style(styles.bold),
+                    current.style(styles.bold),
+                );
+                log_version_source(VersionReqKind::Recommended, &source, styles.config_styles);
+
+                // Don't need to print extra text here -- this is a warning, not an error.
+                crate::helpers::log_needs_update(
+                    Level::INFO,
+                    crate::helpers::BYPASS_VERSION_TEXT,
+                    &styles,
+                );
+
+                Ok(())
+            }
+            NextestVersionEval::ErrorOverride { .. } | NextestVersionEval::WarnOverride { .. } => {
+                // Don't print overrides at the end since users have already opted into overrides --
+                // just be ok with the one at the beginning.
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn load_double_spawn(&self) -> &DoubleSpawnInfo {
+        self.double_spawn.get_or_init(|| {
+            if std::env::var("NEXTEST_EXPERIMENTAL_DOUBLE_SPAWN").is_ok() {
+                warn!(
+                    "double-spawn is no longer experimental: \
+                     NEXTEST_EXPERIMENTAL_DOUBLE_SPAWN does not need to be set"
+                );
+            }
+            if std::env::var("NEXTEST_DOUBLE_SPAWN").as_deref() == Ok("0") {
+                info!("NEXTEST_DOUBLE_SPAWN=0 set, disabling double-spawn for test processes");
+                DoubleSpawnInfo::disabled()
+            } else {
+                DoubleSpawnInfo::try_enable()
+            }
+        })
+    }
+
+    pub(crate) fn load_runner(&self, build_platforms: &BuildPlatforms) -> &TargetRunner {
+        self.target_runner.get_or_init(|| {
+            runner_for_target(
+                &self.cargo_configs,
+                build_platforms,
+                &self.output.stderr_styles(),
+            )
+        })
+    }
+
+    /// Returns the effective build scope for this command.
+    ///
+    /// * If the CLI build scope is non-empty, use that.
+    /// * Otherwise, if this is a rerun, use the chain root's scope
+    ///   (`rerun_build_scope`).
+    /// * Otherwise, use the default build scope.
+    pub(crate) fn resolve_build_scope<'a>(
+        &'a self,
+        rerun_build_scope: Option<&'a BuildScope>,
+    ) -> ResolvedBuildScope<'a> {
+        let cli_has_scope = !self.build_scope.is_empty();
+
+        match (rerun_build_scope, cli_has_scope) {
+            // Inherit from the original run.
+            (Some(scope), false) => ResolvedBuildScope::InheritedFromRoot(scope),
+            // User provided build scope args, not inheriting.
+            (Some(_), true) => ResolvedBuildScope::CommandLineOverridesRoot(&self.build_scope),
+            (None, _) => ResolvedBuildScope::CommandLine(&self.build_scope),
+        }
+    }
+
+    pub(crate) fn build_binary_list(&self, cargo_command: &str) -> Result<Arc<BinaryList>> {
+        let (binary_list, _build_kind) =
+            self.build_binary_list_with_scope(cargo_command, self.resolve_build_scope(None))?;
+        Ok(binary_list)
+    }
+
+    /// Builds the binary list with the given build scope.
+    ///
+    /// Returns the binary list and the build kind (Cargo or reused).
+    pub(crate) fn build_binary_list_with_scope(
+        &self,
+        cargo_command: &str,
+        build_scope: ResolvedBuildScope<'_>,
+    ) -> Result<(Arc<BinaryList>, BuildKind)> {
+        // If reusing a build, just return that.
+        if let Some(m) = self.reuse_build.binaries_metadata() {
+            return Ok((m.binary_list.clone(), BuildKind::Reused));
+        }
+
+        match build_scope {
+            ResolvedBuildScope::InheritedFromRoot(scope) => {
+                if scope.is_empty() {
+                    info!("rerun: inheriting build scope from original run: (default scope)");
+                } else {
+                    info!("rerun: inheriting build scope from original run: {scope}");
+                }
+            }
+            ResolvedBuildScope::CommandLineOverridesRoot(_) => {
+                info!("rerun: using provided build scope, not inheriting from original run");
+            }
+            ResolvedBuildScope::CommandLine(_) => {}
+        }
+
+        let binary_list = self.cargo_settings.compute_binary_list(
+            cargo_command,
+            build_scope.scope(),
+            self.graph(),
+            self.manifest_path.as_deref(),
+            self.output,
+            self.build_platforms.clone(),
+            self.keel_build.as_ref(),
+        )?;
+
+        Ok((Arc::new(binary_list), BuildKind::Cargo))
+    }
+
+    /// Starts building test binaries and returns without waiting for the build.
+    ///
+    /// The caller reads Cargo's messages from the returned stream. Must not be
+    /// called when reusing a build.
+    pub(crate) fn spawn_binary_stream(
+        &self,
+        cargo_command: &str,
+        build_scope: ResolvedBuildScope<'_>,
+    ) -> Result<BinaryStream> {
+        debug_assert!(
+            self.reuse_build.binaries_metadata().is_none(),
+            "a reused build has nothing to stream"
+        );
+        self.cargo_settings.spawn_binary_stream(
+            cargo_command,
+            build_scope.scope(),
+            self.manifest_path.as_deref(),
+            self.output,
+            self.keel_build.as_ref(),
+        )
+    }
+
+    #[inline]
+    pub(crate) fn graph(&self) -> &PackageGraph {
+        &self.package_graph
+    }
+
+    pub(crate) fn load_profile<'cfg>(
+        &self,
+        config: &'cfg NextestConfig,
+    ) -> Result<EarlyProfile<'cfg>> {
+        let profile_name = self.config_opts.profile.as_deref().unwrap_or_else(|| {
+            // The "official" way to detect a miri environment is with MIRI_SYSROOT.
+            // https://github.com/rust-lang/miri/pull/2398#issuecomment-1190747685
+            if std::env::var_os("MIRI_SYSROOT").is_some() {
+                NextestConfig::DEFAULT_MIRI_PROFILE
+            } else {
+                NextestConfig::DEFAULT_PROFILE
+            }
+        });
+        let profile = config
+            .profile(profile_name)
+            .map_err(ExpectedError::profile_not_found)?;
+        if profile.has_junit() {
+            let store_dir = profile.store_dir();
+            std::fs::create_dir_all(store_dir).map_err(|err| {
+                ExpectedError::StoreDirCreateError {
+                    store_dir: store_dir.to_owned(),
+                    err,
+                }
+            })?;
+        }
+        Ok(profile)
+    }
+}
+
+/// The build scope for a command, including its source.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ResolvedBuildScope<'a> {
+    CommandLine(&'a BuildScope),
+    InheritedFromRoot(&'a BuildScope),
+    CommandLineOverridesRoot(&'a BuildScope),
+}
+
+impl<'a> ResolvedBuildScope<'a> {
+    pub(crate) fn scope(self) -> &'a BuildScope {
+        match self {
+            Self::CommandLine(scope)
+            | Self::InheritedFromRoot(scope)
+            | Self::CommandLineOverridesRoot(scope) => scope,
+        }
+    }
+}
+
+/// Returns the current nextest version.
+pub(crate) fn current_version() -> Version {
+    // This is a test-only, not part of the public API.
+    match std::env::var("__NEXTEST_TEST_VERSION") {
+        Ok(version) => version
+            .parse()
+            .expect("__NEXTEST_TEST_VERSION should be a valid semver version"),
+        Err(VarError::NotPresent) => env!("CARGO_PKG_VERSION")
+            .parse()
+            .expect("CARGO_PKG_VERSION should be a valid semver version"),
+        Err(error) => {
+            panic!("error reading __NEXTEST_TEST_VERSION: {error}");
+        }
+    }
+}
+
+/// A Cargo build whose messages are read as they arrive.
+pub(crate) struct BinaryStream {
+    /// The running build. Its standard output carries the JSON messages.
+    pub(crate) reader: duct::ReaderHandle,
+
+    /// The command line, for error messages.
+    pub(crate) command: Vec<String>,
+
+    /// Whether the JSON messages are also forwarded to standard output.
+    pub(crate) forward_json: bool,
+}
+
+impl BinaryStream {
+    /// Ends the build, and the compilers and build scripts it started.
+    ///
+    /// On Unix the build runs in a process group of its own, which is signalled
+    /// as a whole: terminating Cargo alone would leave its children running to
+    /// the end of whatever they are doing.
+    pub(crate) fn terminate(&self) {
+        #[cfg(unix)]
+        for pid in self.reader.pids() {
+            if let Ok(pid) = i32::try_from(pid) {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+        }
+        let _ = self.reader.kill();
+    }
+}
+
+// Helper for CargoBuildSettings.
+mod helpers {
+    use super::BinaryStream;
+    use crate::{
+        ExpectedError, Result,
+        cargo_cli::{CargoBuildSettings, CargoCli, KeelBuildFlags},
+        dispatch::core::value_enums::CargoMessageFormatOpt,
+        output::OutputContext,
+    };
+    use camino::Utf8Path;
+    use guppy::graph::PackageGraph;
+    use nextest_runner::{
+        build_scope::BuildScope,
+        list::{BinaryList, BinaryListBuilder},
+        platform::BuildPlatforms,
+    };
+    use std::io::{BufRead, BufReader};
+
+    impl CargoBuildSettings {
+        fn make_test_build_cli<'a>(
+            &self,
+            cargo_command: &'a str,
+            build_scope: &BuildScope,
+            manifest_path: Option<&Utf8Path>,
+            output: OutputContext,
+            keel: Option<&KeelBuildFlags>,
+        ) -> Result<(CargoCli<'a>, bool)> {
+            // Don't use the manifest path from the graph to ensure that if the user cd's into a
+            // particular crate and runs cargo nextest, then it behaves identically to cargo test.
+            let mut cargo_cli = CargoCli::new(cargo_command, manifest_path, output);
+
+            let message_format = CargoMessageFormatOpt::combine(&self.cargo_message_format)?;
+
+            // Only build tests in the cargo test invocation, do not run them.
+            cargo_cli
+                .add_arg("--no-run")
+                .add_flag_value("--message-format", message_format.cargo_arg());
+            cargo_cli.add_options(build_scope, self);
+            if let Some(keel) = keel {
+                cargo_cli.add_keel_flags(keel);
+            }
+            Ok((cargo_cli, message_format.forward_json()))
+        }
+
+        #[expect(clippy::too_many_arguments)]
+        pub(crate) fn compute_binary_list(
+            &self,
+            cargo_command: &str,
+            build_scope: &BuildScope,
+            graph: &PackageGraph,
+            manifest_path: Option<&Utf8Path>,
+            output: OutputContext,
+            build_platforms: BuildPlatforms,
+            keel: Option<&KeelBuildFlags>,
+        ) -> Result<BinaryList> {
+            let (cargo_cli, forward_json) =
+                self.make_test_build_cli(cargo_command, build_scope, manifest_path, output, keel)?;
+
+            Self::run_cargo_build(cargo_cli, graph, build_platforms, forward_json)
+        }
+
+        /// Starts the build and returns without waiting for it, so that the
+        /// caller can read the messages as Cargo writes them.
+        pub(crate) fn spawn_binary_stream(
+            &self,
+            cargo_command: &str,
+            build_scope: &BuildScope,
+            manifest_path: Option<&Utf8Path>,
+            output: OutputContext,
+            keel: Option<&KeelBuildFlags>,
+        ) -> Result<BinaryStream> {
+            let (cargo_cli, forward_json) =
+                self.make_test_build_cli(cargo_command, build_scope, manifest_path, output, keel)?;
+            let command: Vec<String> = cargo_cli
+                .all_args()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let expression = cargo_cli.to_expression();
+            // Give the build a process group of its own, so that ending the build
+            // ends the whole tree. A terminal's interrupt reaches nextest, which
+            // ends the build in turn.
+            #[cfg(unix)]
+            let expression = expression.before_spawn(|command| {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+                Ok(())
+            });
+            let reader = expression
+                .stdout_capture()
+                .unchecked()
+                .reader()
+                .map_err(|err| ExpectedError::build_exec_failed(&command, err))?;
+            Ok(BinaryStream {
+                reader,
+                command,
+                forward_json,
+            })
+        }
+
+        fn run_cargo_build(
+            cargo_cli: CargoCli<'_>,
+            graph: &PackageGraph,
+            build_platforms: BuildPlatforms,
+            forward_json: bool,
+        ) -> Result<BinaryList> {
+            let expression = cargo_cli.to_expression();
+            let reader_handle = expression
+                .stdout_capture()
+                .unchecked()
+                .reader()
+                .map_err(|err| ExpectedError::build_exec_failed(cargo_cli.all_args(), err))?;
+
+            // Read lines as they arrive, forwarding JSON to stdout if requested and building the
+            // binary list incrementally.
+            let mut binary_list_builder = BinaryListBuilder::new(graph, build_platforms);
+            for line in BufReader::new(&reader_handle).lines() {
+                let line = line
+                    .map_err(|err| ExpectedError::build_exec_failed(cargo_cli.all_args(), err))?;
+                if forward_json {
+                    println!("{}", line);
+                }
+                binary_list_builder.process_message_line(&line)?;
+            }
+
+            // After reading completes (EOF), the handle is internally waited on.
+            // try_wait() returns the output.
+            let output = reader_handle
+                .try_wait()
+                .map_err(|err| ExpectedError::build_exec_failed(cargo_cli.all_args(), err))?
+                .expect("child process should have exited after EOF");
+            if !output.status.success() {
+                return Err(ExpectedError::build_failed(
+                    cargo_cli.all_args(),
+                    output.status.code(),
+                ));
+            }
+
+            Ok(binary_list_builder.finish())
+        }
+    }
+}
