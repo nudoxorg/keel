@@ -211,20 +211,63 @@ fn parent_exit_does_not_wait_for_a_descendant_holding_stdout() {
 
 #[test]
 fn copied_identity_bindings_preserve_json_and_symbol_bytes_across_real_processes() {
-    let world = Sandbox::new();
-    let identity = json!({"kind":"selected-symbol-id","bytes":(0u8..32).collect::<Vec<_>>()});
-    let emit = format!("printf '%s' '{}'", json!({"identity":identity}));
-    let case = json!({"id":"typed-binding","language":"protocol","daemon":false,"steps":[
-        {"id":"capture","kind":"process","binary":"probe","args":["-c",emit],"expect":{"exit":0,"json":[{"pointer":"/identity","equals":identity}]},"bind":{"copied":"/identity","key":{"pointer":"/identity","transform":"selected-symbol-key"}}},
-        {"id":"consume","kind":"process","binary":"probe","args":["-c","IFS= read -r value; printf '%s' \"$value\""],"input":{"identity":"${copied}","key":"${key}"},"expect":{"exit":0,"json":[{"pointer":"/identity","equals":"${copied}"},{"pointer":"/key","equals":"symbol:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}]}}
-    ]});
-    let result = world.invoke(&manifest(vec![case]), &[]);
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(world.report()["cases"][0]["steps"][1]["status"], "pass");
+    // The canonical field shape is retained from an actual 631a Rust owner
+    // search response, rather than inferred from the internal Rust field name.
+    let live: Value = serde_json::from_str(include_str!("fixtures/selected-symbol-live.json"))
+        .expect("retained live identity");
+    for (identity, expected) in [
+        (
+            live,
+            "symbol:193be41234a71fb32ed5ff4967cbb58f9919682ae08659ff7900a365480899e2",
+        ),
+        (
+            json!({"kind":"selected-symbol-id","value":(0u8..32).collect::<Vec<_>>()}),
+            "symbol:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        ),
+    ] {
+        let world = Sandbox::new();
+        let emit = format!("printf '%s' '{}'", json!({"identity":identity}));
+        let case = json!({"id":"typed-binding","language":"protocol","daemon":false,"steps":[
+            {"id":"capture","kind":"process","binary":"probe","args":["-c",emit],"expect":{"exit":0,"json":[{"pointer":"/identity","equals":identity}]},"bind":{"copied":"/identity","key":{"pointer":"/identity","transform":"selected-symbol-key"}}},
+            {"id":"consume","kind":"process","binary":"probe","args":["-c","IFS= read -r value; printf '%s' \"$value\""],"input":{"identity":"${copied}","key":"${key}"},"expect":{"exit":0,"json":[{"pointer":"/identity","equals":"${copied}"},{"pointer":"/key","equals":expected}]}}
+        ]});
+        let result = world.invoke(&manifest(vec![case]), &[]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(world.report()["cases"][0]["steps"][1]["status"], "pass");
+    }
+}
+
+#[test]
+fn malformed_selected_identities_cannot_create_a_dependent_world_step() {
+    for identity in [
+        json!({"kind":"selected-symbol-id","value":"0".repeat(64)}),
+        json!({"kind":"selected-symbol-id","value":"AB".repeat(32)}),
+        json!({"kind":"selected-symbol-id","value":"12"}),
+        json!({"kind":"selected-symbol-id","value":vec![256;32]}),
+        json!({"kind":"selected-symbol-id","value":vec![1;31]}),
+        json!({"kind":"selected-symbol-id","bytes":vec![1;32]}),
+        json!({"kind":"other-id","value":"ab".repeat(32)}),
+    ] {
+        let world = Sandbox::new();
+        let emit = format!("printf '%s' '{}'", json!({"identity":identity}));
+        let case = json!({"id":"invalid-identity","language":"protocol","daemon":false,"steps":[
+            {"id":"capture","kind":"process","binary":"probe","args":["-c",emit],"expect":{"exit":0,"json":[{"pointer":"/identity","equals":identity}]},"bind":{"key":{"pointer":"/identity","transform":"selected-symbol-key"}}},
+            {"id":"must-not-run","kind":"write","files":{"sentinel":"invalid identity propagated"}}
+        ]});
+        let output = world.invoke(&manifest(vec![case]), &[]);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(world.report()["cases"][0]["steps"][1]["status"], "blocked");
+        assert!(
+            !world
+                .0
+                .join("evidence/invalid-identity/project/sentinel")
+                .exists()
+        );
+    }
 }
 
 #[test]
