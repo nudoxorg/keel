@@ -20,15 +20,7 @@ let
   keelStore = pkgs.rustPlatform.buildRustPackage {
     pname = "keel-store";
     version = "0.1.0";
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ../Cargo.toml
-        ../Cargo.lock
-        ../crates
-        ../bench
-      ];
-    };
+    src = import ./vm-workspace-source.nix { inherit lib; };
     cargoLock.lockFile = ../Cargo.lock;
     cargoBuildFlags = [
       "--package"
