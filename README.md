@@ -32,6 +32,9 @@ measured call-graph statistics for the observed subgraph; global blast radius an
 complexity remain unknown when relation coverage is not certified. See
 [the observation contract](docs/nudox-guidance.md).
 
+The original Keel nextest fork is preserved under `nextest/` with its actual
+upstream and fork commit history. See [the nextest provenance](docs/nextest-history.md).
+
 The project is under active development. A model declaration is not execution
 evidence, successful pagination is not a coverage certificate, and retained hashes
 do not attest historical execution. Unknown and blocked requirements remain
