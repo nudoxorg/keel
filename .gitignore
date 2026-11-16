@@ -1,0 +1,10 @@
+/nextest/
+/backend/
+target/
+ci-facts/
+*.output
+.local/
+
+result
+result-*
+*.log
