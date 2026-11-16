@@ -161,6 +161,7 @@ pub fn evaluate(
     let mut failed_worlds = BTreeMap::new();
     let mut receipts: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut blocked_cases: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unavailable_cases = BTreeSet::new();
     let mut case_outcomes = BTreeMap::new();
     let mut case_inputs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut case_artifacts: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -415,6 +416,7 @@ pub fn evaluate(
             }
         }
         // A case may only bind to a check that names its declared node.
+        let mut modeled_cases = BTreeSet::new();
         for group in model.checks.values() {
             for cell in &group.checks {
                 if let Some(id) = case_id(cell).filter(|id| receipts.contains_key(*id)) {
@@ -432,6 +434,7 @@ pub fn evaluate(
                         if !cell.on.contains(&case.node) {
                             bail!("case {id} node {} is not on its declared check", case.node);
                         }
+                        modeled_cases.insert(id.to_owned());
                         for node in &cell.on {
                             if res.node_index(node).is_none() {
                                 bail!("case {id} refers to unknown node {node}");
@@ -439,6 +442,27 @@ pub fn evaluate(
                         }
                     }
                 }
+            }
+        }
+        // A dependent's own hash does not bind its prerequisites' definitions.
+        // Unless every prerequisite is also bound to the current model (and its
+        // prerequisites are bound), leave the dependent unknown.
+        loop {
+            let mut changed = false;
+            for (id, case) in &cases {
+                if receipts.contains_key(id)
+                    && !unavailable_cases.contains(id)
+                    && case
+                        .requires
+                        .iter()
+                        .any(|dep| !modeled_cases.contains(dep) || unavailable_cases.contains(dep))
+                {
+                    unavailable_cases.insert(id.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
         manifest_hash = Some(hash);
@@ -453,13 +477,14 @@ pub fn evaluate(
                     bail!("multiple checks bind driver case {id}");
                 }
             }
-            let blocked_by_cases = if verified {
-                case.and_then(|id| blocked_cases.get(id))
-                    .cloned()
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let blocked_by_cases =
+                if verified && case.is_some_and(|id| !unavailable_cases.contains(id)) {
+                    case.and_then(|id| blocked_cases.get(id))
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
             let mut blocked_by = None;
             let mut cursor = cell.world.as_deref();
             let mut visited = BTreeSet::new();
@@ -512,7 +537,7 @@ pub fn evaluate(
                     .unwrap_or_default(),
                 state: if blocked_by.is_some() {
                     "blocked"
-                } else if verified {
+                } else if verified && case.is_some_and(|id| !unavailable_cases.contains(id)) {
                     case.and_then(|id| receipts.get(id).copied())
                         .unwrap_or("unknown")
                 } else {

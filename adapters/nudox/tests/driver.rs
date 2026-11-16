@@ -418,6 +418,63 @@ fn actual_blocked_case_receipts_reach_tree_and_judge() {
     );
     let transitive_outcome = evidence.case_outcomes.get("transitive").unwrap();
     assert_eq!(transitive_outcome.blocked_by_cases, vec!["dependent"]);
+    let mut missing_foundation = model.clone();
+    missing_foundation
+        .checks
+        .get_mut("contract")
+        .unwrap()
+        .checks
+        .remove(0);
+    let not_bound = driver::evaluate(
+        &missing_foundation,
+        &res,
+        Some(&world.0.join("manifest.json")),
+        Some(&world.0.join("evidence/report.json")),
+        Some(&world.0.join("bins")),
+        Some(std::path::Path::new(env!(
+            "CARGO_BIN_EXE_backend-keel-harness"
+        ))),
+    )
+    .unwrap();
+    assert!(
+        not_bound
+            .checks
+            .iter()
+            .all(|check| check.state == "unknown")
+    );
+    assert!(keel_judge::checks::validate(&not_bound).is_ok());
+    // Even a genuinely passing dependent cannot reuse an unmodeled prerequisite.
+    let other = Sandbox::new();
+    let mut passing_base = process_case("foundation", "echo '{\"answer\":\"independent-oracle\"}'");
+    passing_base["node"] = json!("foundation");
+    let passing_manifest =
+        json!({"schema":1,"cases":[passing_base, child.clone(), transitive.clone()]});
+    assert!(other.invoke(&passing_manifest, &[]).status.success());
+    assert!(
+        other.report()["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|case| case["status"] == "pass")
+    );
+    let missing_pass = driver::evaluate(
+        &missing_foundation,
+        &res,
+        Some(&other.0.join("manifest.json")),
+        Some(&other.0.join("evidence/report.json")),
+        Some(&other.0.join("bins")),
+        Some(std::path::Path::new(env!(
+            "CARGO_BIN_EXE_backend-keel-harness"
+        ))),
+    )
+    .unwrap();
+    assert!(
+        missing_pass
+            .checks
+            .iter()
+            .all(|check| check.state == "unknown")
+    );
+
     let mut forged = world.report();
     forged["cases"][1]["steps"][0]["blocked_by"] = json!(["not-the-prerequisite"]);
     let forged_path = world.0.join("forged.json");
