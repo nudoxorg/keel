@@ -353,10 +353,12 @@ fn actual_blocked_case_receipts_reach_tree_and_judge() {
     let mut base = process_case("foundation", "echo '{\"answer\":\"wrong\"}'");
     base["node"] = json!("foundation");
     let child = json!({"id":"dependent","node":"surface","language":"protocol","daemon":false,"requires":["foundation"],"steps":[{"id":"must-not-run","kind":"write","files":{"sentinel":"unexpected"}}]});
-    let manifest = manifest(vec![base.clone(), child.clone()]);
+    let transitive = json!({"id":"transitive","node":"surface","language":"protocol","daemon":false,"requires":["dependent"],"steps":[{"id":"never-run","kind":"write","files":{"sentinel":"unexpected"}}]});
+    let manifest = manifest(vec![base.clone(), child.clone(), transitive.clone()]);
     let result = world.invoke(&manifest, &[]);
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(world.report()["cases"][1]["status"], "blocked");
+    assert_eq!(world.report()["cases"][2]["status"], "blocked");
     let case_hash =
         |case: &Value| format!("{:x}", Sha256::digest(serde_json::to_vec(case).unwrap()));
     let model = Model::from_json(&json!({"schema":2,"nodes":[
@@ -364,7 +366,8 @@ fn actual_blocked_case_receipts_reach_tree_and_judge() {
         {"id":"surface","at":"fixture","parent":null,"about":null,"ship":"required","on":["foundation"]}],
         "checks":{"contract":{"checks":[
             {"cell":"foundation","on":["foundation"],"run":["keel-case","foundation"],"expect":{"definitionSha256":case_hash(&base)}},
-            {"cell":"dependent","on":["surface"],"run":["keel-case","dependent"],"expect":{"definitionSha256":case_hash(&child)}}]}}}).to_string()).unwrap();
+            {"cell":"dependent","on":["surface"],"run":["keel-case","dependent"],"expect":{"definitionSha256":case_hash(&child)}},
+            {"cell":"transitive","on":["surface"],"run":["keel-case","transitive"],"expect":{"definitionSha256":case_hash(&transitive)}}]}}}).to_string()).unwrap();
     assert!(
         Command::new("git")
             .args(["init", "-q"])
@@ -413,6 +416,8 @@ fn actual_blocked_case_receipts_reach_tree_and_judge() {
             .state,
         "blocked"
     );
+    let transitive_outcome = evidence.case_outcomes.get("transitive").unwrap();
+    assert_eq!(transitive_outcome.blocked_by_cases, vec!["dependent"]);
     let mut forged = world.report();
     forged["cases"][1]["steps"][0]["blocked_by"] = json!(["not-the-prerequisite"]);
     let forged_path = world.0.join("forged.json");
@@ -481,5 +486,5 @@ fn actual_blocked_case_receipts_reach_tree_and_judge() {
     let saved = keel_judge::checks::latest(&world.0.join("judge"))
         .unwrap()
         .unwrap();
-    assert_eq!((saved.fail, saved.blocked, saved.unknown), (1, 1, 0));
+    assert_eq!((saved.fail, saved.blocked, saved.unknown), (1, 2, 0));
 }
