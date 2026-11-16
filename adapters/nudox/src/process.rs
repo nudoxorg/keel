@@ -383,24 +383,37 @@ impl Session {
     pub(crate) fn isolation(&self) -> &serde_json::Value {
         &self.isolation
     }
+    pub(crate) fn pid(&self) -> u32 {
+        self.id
+    }
     fn fail<T>(&mut self, message: String) -> Result<T, String> {
-        self.terminate();
+        let message = match self.terminate() {
+            Ok(()) => message,
+            Err(error) => format!("{message}; session cleanup: {error}"),
+        };
         record_error(&self.stderr_path, &message);
         Err(message)
     }
 
-    fn terminate(&mut self) {
+    fn terminate(&mut self) -> Result<(), String> {
         self.writer.take();
+        let mut failures = Vec::new();
         if let Some(mut child) = self.child.take() {
-            let _ = kill_group(self.id);
+            if let Err(error) = kill_group(self.id) {
+                failures.push(error);
+            }
             let _ = child.kill();
-            let _ = child.wait();
+            if let Err(error) = child.wait() {
+                failures.push(format!("reap session: {error}"));
+            }
         }
         if let Err(error) = self.scope.stop() {
-            record_error(
-                &self.stderr_path,
-                &format!("session containment cleanup: {error}"),
-            );
+            failures.push(error);
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
         }
     }
 
@@ -453,6 +466,11 @@ impl Session {
             {
                 Ok(Ok(value)) => {
                     if let Some(id) = value.get("id") {
+                        if value.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0")
+                            || value.get("result").is_some() == value.get("error").is_some()
+                        {
+                            return self.fail("invalid JSON-RPC response envelope".into());
+                        }
                         if *id != expected {
                             let description = if self.seen_ids.contains(&id.to_string()) {
                                 "duplicate"
@@ -474,11 +492,16 @@ impl Session {
     }
 
     pub(crate) fn finish(&mut self) -> Result<(), String> {
+        self.finish_with_timeout(DRAIN_GRACE)
+    }
+
+    pub(crate) fn finish_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         if self.child.is_none() {
-            return Ok(());
+            return self.scope.stop();
         }
         self.writer.take();
         let start = Instant::now();
+        let deadline = start + timeout;
         let mut failure = None;
         loop {
             while let Ok(event) = self.responses.try_recv() {
@@ -499,24 +522,28 @@ impl Session {
             }
             match self.child.as_mut().expect("open session").try_wait() {
                 Ok(Some(status)) => {
-                    let _ = kill_group(self.id);
+                    if let Err(error) = kill_group(self.id) {
+                        failure.get_or_insert(error);
+                    }
                     self.child.take();
                     if !status.success() {
                         failure.get_or_insert_with(|| format!("session exited with {status}"));
                     }
                     break;
                 }
-                Ok(None) if start.elapsed() < DRAIN_GRACE => {
-                    thread::sleep(Duration::from_millis(10))
-                }
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
                 Ok(None) => {
                     failure.get_or_insert_with(|| "session did not exit after stdin closed".into());
-                    self.terminate();
+                    if let Err(error) = self.terminate() {
+                        failure.get_or_insert(error);
+                    }
                     break;
                 }
                 Err(e) => {
                     failure.get_or_insert_with(|| format!("wait for session: {e}"));
-                    self.terminate();
+                    if let Err(error) = self.terminate() {
+                        failure.get_or_insert(error);
+                    }
                     break;
                 }
             }
@@ -526,11 +553,10 @@ impl Session {
         }
         // Drain remaining messages after the process group is gone, including a
         // duplicate final response. The deadline also bounds inherited pipes.
-        let drain_start = Instant::now();
         loop {
             match self
                 .responses
-                .recv_timeout(DRAIN_GRACE.saturating_sub(drain_start.elapsed()))
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             {
                 Ok(Ok(value)) if value.get("id").is_none() => {}
                 Ok(Ok(value)) => {
@@ -552,7 +578,7 @@ impl Session {
             }
         }
         if let Some(stderr) = self.stderr.take() {
-            match stderr.recv_timeout(DRAIN_GRACE.saturating_sub(drain_start.elapsed())) {
+            match stderr.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(capture) => {
                     if let Some(e) = capture.error {
                         failure.get_or_insert_with(|| format!("session stderr: {e}"));
@@ -575,6 +601,6 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.terminate();
+        let _ = self.terminate();
     }
 }
