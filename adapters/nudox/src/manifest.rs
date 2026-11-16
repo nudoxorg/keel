@@ -36,6 +36,12 @@ pub(crate) struct Step {
     #[serde(default)]
     pub tool: String,
     #[serde(default)]
+    pub session: String,
+    #[serde(default)]
+    pub call: Option<Value>,
+    #[serde(default)]
+    pub mcp_error: bool,
+    #[serde(default)]
     pub arguments: Value,
     #[serde(default)]
     pub files: BTreeMap<String, String>,
@@ -241,6 +247,7 @@ impl Manifest {
                 relative(path)?;
             }
             let mut steps = BTreeSet::new();
+            let mut sessions = BTreeSet::new();
             for step in &case.steps {
                 if step.wait_for && step.kind != "query" {
                     return Err(format!(
@@ -277,13 +284,29 @@ impl Manifest {
                     relative(path)?;
                 }
                 match step.kind.as_str() {
+                    "mcp-start" => {
+                        if !valid_id(&step.session)
+                            || !sessions.insert(step.session.clone())
+                            || sessions.len() > 8
+                        {
+                            return Err(format!(
+                                "{}: invalid, duplicate or excessive live session",
+                                step.id
+                            ));
+                        }
+                    }
+                    "mcp-stop" => {
+                        if !sessions.remove(&step.session) {
+                            return Err(format!("{}: session is not live", step.id));
+                        }
+                    }
                     "write" => {
                         if step.files.is_empty() && step.remove.is_empty() {
                             return Err(format!("{}: write changes nothing", step.id));
                         }
                     }
                     "index" | "restart" => {}
-                    "cli" | "query" | "process" | "pages" => {
+                    "cli" | "query" | "process" | "pages" | "mcp-call" => {
                         let e = step.expect.as_ref().ok_or_else(|| {
                             format!(
                                 "{}: executable steps require reviewed expectations",
@@ -322,6 +345,16 @@ impl Manifest {
                                 ));
                             }
                         }
+                        if step.kind == "mcp-call"
+                            && (!sessions.contains(&step.session)
+                                || (step.call.is_some() == !step.tool.is_empty())
+                                || e.exit != 0)
+                        {
+                            return Err(format!(
+                                "{}: call needs a live session and exactly one copied call or tool",
+                                step.id
+                            ));
+                        }
                         if step.kind == "pages"
                             && (step.tool.is_empty()
                                 || step.minimum_pages == 0
@@ -348,6 +381,12 @@ impl Manifest {
                     }
                     other => return Err(format!("{}: unknown step kind {other}", step.id)),
                 }
+            }
+            if !sessions.is_empty() {
+                return Err(format!(
+                    "{}: every MCP session requires an explicit stop",
+                    case.id
+                ));
             }
         }
         let known = self

@@ -588,3 +588,123 @@ fn actual_blocked_case_receipts_reach_tree_and_judge() {
         .unwrap();
     assert_eq!((saved.fail, saved.blocked, saved.unknown), (1, 2, 0));
 }
+
+// A real external JSON-lines peer witnesses lifecycle and cleanup; it does not
+// stand in for the product's cursor semantics, which Backend tests separately.
+#[test]
+fn named_mcp_sessions_span_other_steps_restart_and_reap_on_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = Sandbox::new();
+    let peer = world.0.join("bins/backend-mcp");
+    fs::write(&peer, r##"#!/bin/sh
+printf '%s\n' "$$" >> session-pids
+while IFS= read -r line; do
+ case "$line" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25"}}' ;;
+  *'"method":"notifications/initialized"'*) ;;
+  *'"method":"tools/call"'*)
+   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+   case "$line" in
+    *'"name":"first"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":false,"structuredContent":{"pid":%s,"continuation_call":{"name":"next","arguments":{"cursor":{"marker":"untouched","limit":3}}}}}}\n' "$id" "$$" ;;
+    *'"marker":"untouched"'*'"name":"next"'*)
+      if [ -f changed ]; then changed=true; else changed=false; fi
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":false,"structuredContent":{"pid":%s,"changed":%s}}}\n' "$id" "$$" "$changed" ;;
+    *'"name":"hang"'*) sleep 20 ;;
+    *'"name":"refuse"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":true,"structuredContent":{"slug":"cursor-mismatch"}}}\n' "$id" ;;
+    *) printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":false,"structuredContent":{"pid":%s}}}\n' "$id" "$$" ;;
+   esac ;;
+ esac
+done
+"##).expect("write fake process");
+    fs::set_permissions(&peer, fs::Permissions::from_mode(0o700)).expect("executable peer");
+    let case = json!({"id":"session-history","language":"protocol","daemon":false,"steps":[
+        {"id":"open","kind":"mcp-start","session":"client","bind":{"first_pid":"/pid"}},
+        {"id":"first","kind":"mcp-call","session":"client","tool":"first","arguments":{},"bind":{"next":"/continuation_call"},"expect":{"exit":0,"json":[{"pointer":"/pid","equals":"${first_pid}"}]}},
+        {"id":"edit","kind":"write","files":{"changed":"revision two"}},
+        {"id":"other-process","kind":"process","binary":"probe","args":["-c","test -f changed && printf '{\"answer\":\"changed\"}'"],"expect":{"exit":0,"json":[{"pointer":"/answer","equals":"changed"}]}},
+        {"id":"continued","kind":"mcp-call","session":"client","call":"${next}","expect":{"exit":0,"json":[{"pointer":"/pid","equals":"${first_pid}"},{"pointer":"/changed","equals":true}]}},
+        {"id":"refused","kind":"mcp-call","session":"client","tool":"refuse","arguments":{},"mcp_error":true,"expect":{"exit":0,"json":[{"pointer":"/slug","equals":"cursor-mismatch"}]}},
+        {"id":"close","kind":"mcp-stop","session":"client"},
+        {"id":"reopen","kind":"mcp-start","session":"client","bind":{"second_pid":"/pid"}},
+        {"id":"new-process","kind":"mcp-call","session":"client","tool":"new","arguments":{},"expect":{"exit":0,"json":[{"pointer":"/pid","equals":"${second_pid}"}]}},
+        {"id":"close-again","kind":"mcp-stop","session":"client"}
+    ]});
+    let failure = json!({"id":"session-failure","language":"protocol","daemon":false,"steps":[
+        {"id":"open","kind":"mcp-start","session":"client"},
+        {"id":"fail","kind":"mcp-call","session":"client","tool":"new","arguments":{},"expect":{"exit":0,"json":[{"pointer":"/pid","equals":0}]}},
+        {"id":"close","kind":"mcp-stop","session":"client"}
+    ]});
+    let hung = json!({"id":"session-timeout","language":"protocol","daemon":false,"steps":[
+        {"id":"open","kind":"mcp-start","session":"client"},
+        {"id":"hang","kind":"mcp-call","session":"client","tool":"hang","arguments":{},"timeout_seconds":1,"expect":{"exit":0,"json":[{"pointer":"/pid","equals":0}]}},
+        {"id":"close","kind":"mcp-stop","session":"client"}
+    ]});
+    let result = world.invoke(&manifest(vec![case, failure, hung]), &[]);
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = world.report();
+    assert_eq!(report["cases"][0]["status"], "pass", "{report}");
+    assert_eq!(report["cases"][1]["status"], "fail", "{report}");
+    assert_eq!(report["cases"][1]["steps"][2]["status"], "blocked");
+    assert_eq!(report["cases"][2]["status"], "fail");
+    assert!(
+        report["cases"][2]["steps"][1]["error"]
+            .as_str()
+            .expect("timeout error")
+            .contains("timed out")
+    );
+    let steps = report["cases"][0]["steps"].as_array().expect("steps");
+    let first = steps[0]["detail"]["pid"].as_u64().expect("first pid");
+    let second = steps[7]["detail"]["pid"].as_u64().expect("second pid");
+    assert_eq!(steps[4]["detail"]["pid"], first);
+    assert_ne!(first, second, "restarting creates a new process");
+    assert_eq!(steps[6]["detail"]["reaped"], true);
+    assert_eq!(steps[9]["detail"]["reaped"], true);
+    for case in ["session-history", "session-failure", "session-timeout"] {
+        let pids = fs::read_to_string(
+            world
+                .0
+                .join("evidence")
+                .join(case)
+                .join("project/session-pids"),
+        )
+        .expect("observed peer pids");
+        for pid in pids.lines() {
+            assert!(!alive(pid), "MCP peer {pid} survived {case}");
+        }
+    }
+    let request: Value = serde_json::from_slice(
+        &fs::read(
+            world
+                .0
+                .join("evidence/session-history/004-continued.request.json"),
+        )
+        .expect("copied request"),
+    )
+    .expect("JSON");
+    assert_eq!(
+        request["params"],
+        json!({"name":"next","arguments":{"cursor":{"marker":"untouched","limit":3}}})
+    );
+    for steps in [
+        json!([{"id":"call","kind":"mcp-call","session":"missing","tool":"x","arguments":{},"expect":{"exit":0,"json":[{"pointer":"/x","equals":1}]}}]),
+        json!([{"id":"stop","kind":"mcp-stop","session":"missing"}]),
+        json!([{"id":"open","kind":"mcp-start","session":"s"}]),
+        json!([{"id":"open","kind":"mcp-start","session":"s"},{"id":"again","kind":"mcp-start","session":"s"},{"id":"close","kind":"mcp-stop","session":"s"}]),
+    ] {
+        let invalid = Sandbox::new();
+        let definition =
+            json!({"id":"invalid-lifecycle","language":"protocol","daemon":false,"steps":steps});
+        let result = invalid.invoke(&manifest(vec![definition]), &[]);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "invalid lifecycle must be refused before execution"
+        );
+        assert!(!invalid.0.join("evidence").exists());
+    }
+}
