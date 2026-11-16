@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "changes": [
+    "src/lib.rs"
+  ],
+  "observations": [
+    {
+      "case": "observed",
+      "coordinate": "/workspace/example::src/lib.rs:1::entry",
+      "before": "before.json",
+      "graph": "graph.json",
+      "source": "source.json",
+      "after": "after.json"
+    }
+  ]
+}

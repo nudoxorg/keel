@@ -1,0 +1,11 @@
+error: `Backend::Store` is not a crate name; joins entries use only a-z, 0-9, `_` and `-`, for example `backend-store` or the identifier `backend_store`
+ --> tests/ui/fail/bad_join_name.rs:3:9
+  |
+3 | #[joins("Backend::Store")]
+  |         ^^^^^^^^^^^^^^^^
+
+error: `Backend` is not a crate name; joins entries use only a-z, 0-9, `_` and `-`, for example `backend-store` or the identifier `backend_store`
+ --> tests/ui/fail/bad_join_name.rs:6:9
+  |
+6 | #[joins(Backend)]
+  |         ^^^^^^^

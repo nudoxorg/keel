@@ -1,0 +1,31 @@
+error: #[stands_on] entries must be a string literal such as "unit(backend-store)"
+ --> tests/ui/fail/wrong_argument_kinds.rs:3:13
+  |
+3 | #[stands_on(unit)]
+  |             ^^^^
+
+error: #[joins] entries must be a crate name as an identifier (backend_store) or a string literal
+ --> tests/ui/fail/wrong_argument_kinds.rs:6:9
+  |
+6 | #[joins(1)]
+  |         ^
+
+error: #[stands_on] needs at least one entry, for example #[stands_on("unit(backend-store)", "integration(backend-flow)")]
+ --> tests/ui/fail/wrong_argument_kinds.rs:9:1
+  |
+9 | #[stands_on()]
+  | ^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `stands_on` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `a` is listed twice in #[joins]
+  --> tests/ui/fail/wrong_argument_kinds.rs:12:12
+   |
+12 | #[joins(a, a)]
+   |            ^
+
+error: #[stands_on] applies to a test `fn` only, but this item is not one (expected `fn`)
+  --> tests/ui/fail/wrong_argument_kinds.rs:16:1
+   |
+16 | struct NotAFn;
+   | ^^^^^^

@@ -1,0 +1,15 @@
+{
+  "packages": [
+    { "name": "store", "id": "path+file:///w/crates/store#0.1.0",
+      "dependencies": [ { "name": "version", "kind": null }, { "name": "serde", "kind": null }, { "name": "version", "kind": "dev" } ] },
+    { "name": "version", "id": "path+file:///w/crates/version#0.1.0", "dependencies": [ { "name": "serde", "kind": null } ] },
+    { "name": "flow", "id": "path+file:///w/crates/flow#0.1.0",
+      "dependencies": [ { "name": "store", "kind": null }, { "name": "store", "kind": "dev" }, { "name": "flow", "kind": null } ] },
+    { "name": "serde", "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.200", "dependencies": [] }
+  ],
+  "workspace_members": [
+    "path+file:///w/crates/store#0.1.0",
+    "path+file:///w/crates/version#0.1.0",
+    "path+file:///w/crates/flow#0.1.0"
+  ]
+}

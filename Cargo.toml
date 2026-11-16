@@ -1,0 +1,84 @@
+# Keel: the hierarchy, keying and store library, its macros, the conductor,
+# the result-store service, and the synthetic benchmark generator. The
+# nextest fork in nextest/ is a separate workspace that depends on
+# crates/keel by path.
+[workspace]
+resolver = "3"
+members = ["crates/*", "bench/synth-workspace", "adapters/nudox"]
+# bench/data holds JSON, not a crate; the bench/* glob would otherwise fail to load it.
+# keel-fuzz stays outside the workspace while its engine is being chosen: a
+# fuzzing engine brings hundreds of crates, and they should not enter this
+# lock file or slow every other build until the choice is made.
+# bench/alt-compilers holds other compilers and throwaway packages; `cargo new`
+# inside a workspace adds itself to `members`, which then breaks every build
+# here once the experiment is deleted.
+exclude = ["bench/data", "crates/keel-fuzz", "bench/alt-compilers"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.dependencies]
+anyhow = "1"
+blake3 = { version = "1", features = ["rayon", "mmap"] }
+camino = { version = "1", features = ["serde1"] }
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+ignore = "0.4"
+object = { version = "0.37", default-features = false, features = ["read", "std"] }
+proptest = "1"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.9"
+smol_str = { version = "0.3", features = ["serde"] }
+thiserror = "2"
+toml = "0.8"
+# Added for crates/keel-macros (proc macro) and its tests.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }
+roaring = "0.10"
+trybuild = "1"
+# Added for crates/keel-store (the result-store service and its client).
+# tower-http is not needed: request logging is one small axum middleware.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "time", "process", "io-util"] }
+# Blocking client, plain http only: the store is reached over the CI bridge,
+# so no TLS stack (and no aws-lc C build) is pulled into the runner.
+ureq = { version = "3", default-features = false }
+rustix = { version = "1", features = ["fs"] }
+hex = "0.4"
+rand = "0.9"
+# Added for crates/keel-reach: symbol demangling for entry matching and observed
+# joins, and mmap so ~1,000 rlibs per binary are parsed lazily.
+rustc-demangle = "0.1"
+memmap2 = "0.9"
+# Added for crates/keel-store's conductor: a Stream over a channel for the job-log body.
+futures-core = "0.3"
+# Added for crates/keel-cli. The lexer is pinned exactly: rust-analyzer republishes it
+# from rustc's tree every week with API changes, and Stage 0's position-preserving rule
+# must not change meaning under a casual `cargo update`. humantime parses `--limit 10m`.
+ra-ap-rustc_lexer = "=0.165.0"
+humantime = "2"
+# Added for crates/keel-conduct: ed25519 signing for attestations (the secret key is
+# a 32-byte seed read from a file, so the `rand_core` feature is not needed; keygen
+# draws its seed from `rand`) and the base64 text form of keys and signatures.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+base64 = "0.22"
+# Added for crates/keel-judge: statvfs, process-group signals and the supervisor's own signal handlers.
+libc = "0.2"
+# Added for crates/keel-judge: READY, WATCHDOG and STOPPING to systemd over NOTIFY_SOCKET, so a
+# supervisor stuck in a quantum is restarted. No dependencies of its own beyond libc.
+sd-notify = "0.4"
+
+# keel-reach hashes every atom of ~1,000 rlibs per binary; unoptimised blake3 is
+# an order of magnitude slower and would dominate the debug-profile tests.
+[profile.dev.package.blake3]
+opt-level = 3

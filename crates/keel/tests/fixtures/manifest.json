@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "producer": "nextest-keel 0.1.0",
+  "repo": "Nudox/Backend", "revision": "7ab31d0…",
+  "platform": { "triple": "x86_64-unknown-linux-gnu", "toolchain": "rustc 1.97.1 (…)",
+                "emulator": null, "net": "isolated" },
+  "nodes": [
+    {
+      "id": "rust:backend-store::wal_replay::replays_torn_tail",
+      "kind": "rust-test",
+      "group": "unit(backend-store)",
+      "stands_on": ["rust:backend-version::semver::parses_prerelease", "unit(backend-platform)"],
+      "joins": ["crate:backend-store"],
+      "inputs": { "code": "blake3:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "code_kind": "reach", "files": "blake3:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+                  "env": "blake3:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3", "tools": "blake3:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4", "consumes": [] },
+      "key": "blake3:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+      "policy": { "blocks": true, "control": null, "timeout_s": 60, "network": false, "sensitive": [] }
+    },
+    {
+      "id": "nix:scenario:backend-mcp-serves",
+      "kind": "nix-check",
+      "group": "scenario(backend-mcp)",
+      "stands_on": ["nix:scenario:backend-locald-starts", "rust:unit(backend-mcp)"],
+      "joins": ["service:nudox-backend", "edge:mcp-to-locald"],
+      "inputs": { "drv": "/nix/store/…-scenario-backend.drv" },
+      "via": "/nix/store/…-scenario-backend-report",
+      "key": "sha256:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+      "policy": { "blocks": true, "control": null }
+    },
+    {
+      "id": "nix:scenario:backend-mcp-serves!wrong-port",
+      "kind": "nix-check", "group": "scenario(backend-mcp)",
+      "stands_on": [], "joins": ["service:nudox-backend"],
+      "inputs": { "drv": "/nix/store/…-scenario-backend.drv" },
+      "key": "sha256:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+      "policy": { "control": "negative", "twin": "nix:scenario:backend-mcp-serves" }
+    }
+  ]
+}

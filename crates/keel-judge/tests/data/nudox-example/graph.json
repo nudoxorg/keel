@@ -1,0 +1,39 @@
+{
+  "answer": "records",
+  "detail": "full",
+  "query": "/workspace/example::src/lib.rs:1::entry",
+  "coverage": [
+    {
+      "lane": "graph",
+      "state": "complete"
+    }
+  ],
+  "records": [
+    {
+      "identity": {
+        "coordinate": "/workspace/example::src/lib.rs",
+        "project": "/workspace/example",
+        "path": "src/lib.rs",
+        "shape": "module",
+        "name": "lib.rs"
+      },
+      "kind": "module",
+      "language": "rust",
+      "state": "ready"
+    },
+    {
+      "identity": {
+        "coordinate": "/workspace/example::src/lib.rs:1::entry",
+        "project": "/workspace/example",
+        "path": "src/lib.rs",
+        "shape": "declaration",
+        "name": "entry"
+      },
+      "kind": "function",
+      "language": "rust",
+      "state": "ready",
+      "signature": "fn entry()"
+    }
+  ],
+  "more": false
+}

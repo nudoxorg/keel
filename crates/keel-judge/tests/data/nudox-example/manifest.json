@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "unknown"
+    },
+    {
+      "id": "observed"
+    }
+  ]
+}

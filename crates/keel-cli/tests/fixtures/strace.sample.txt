@@ -1,0 +1,22 @@
+4101  execve("/work/target/debug/deps/store-1a2b", ["/work/target/debug/deps/store-1a2b", "--exact", "wal::replays"], 0x7ffd /* 3 vars */) = 0
+4101  openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+4101  openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</lib/x86_64-linux-gnu/libc.so.6>
+4101  openat(AT_FDCWD, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 4</proc/4101/maps>
+4101  openat(AT_FDCWD, "fixtures/wal.bin", O_RDONLY|O_CLOEXEC) = 5</work/crates/store/fixtures/wal.bin>
+4101  openat(AT_FDCWD, "/home/ci/.config/tool.toml", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+4101  openat(AT_FDCWD, "/tmp/keel-t/out.log", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 6</tmp/keel-t/out.log>
+4101  openat(AT_FDCWD, "/srv/shared/data.json", O_RDWR|O_CLOEXEC) = 7</srv/shared/data.json>
+4101  newfstatat(AT_FDCWD, "/etc/hostname", {st_mode=S_IFREG|0644, st_size=5, ...}, 0) = 0
+4101  newfstatat(5</work/crates/store/fixtures/wal.bin>, "", {st_mode=S_IFREG|0644, st_size=17, ...}, AT_EMPTY_PATH) = 0
+4101  openat(8</work/crates/store/fixtures>, "more.bin", O_RDONLY|O_CLOEXEC) = 9</work/crates/store/fixtures/more.bin>
+4101  openat(8</srv/other>, "../secret/key.pem", O_RDONLY) = 9</srv/secret/key.pem>
+4101  readlink("/proc/self/exe", "/work/target/debug/deps/store-1a2b", 4096) = 33
+4101  access("/usr/bin/git", X_OK) = 0
+4101  mkdir("/tmp/keel-t/sub", 0777) = 0
+4102  openat(AT_FDCWD, "/opt/odd dir/\"quoted\"\n.txt", O_RDONLY <unfinished ...>
+4101  openat(AT_FDCWD, "/srv/interleaved.txt", O_RDONLY|O_CLOEXEC <unfinished ...>
+4102  <... openat resumed>)            = 10</opt/odd dir/"quoted"\n.txt>
+4101  <... openat resumed>)            = 3</srv/interleaved.txt>
+4101  openat2(AT_FDCWD, "/srv/openat2.txt", {flags=O_RDONLY|O_CLOEXEC, resolve=RESOLVE_NO_SYMLINKS}, 24) = 3</srv/openat2.txt>
+4101  --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=4102, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+4101  +++ exited with 0 +++

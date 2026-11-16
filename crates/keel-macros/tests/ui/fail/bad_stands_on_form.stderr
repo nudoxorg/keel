@@ -1,0 +1,11 @@
+error: `backend-store` is not a recognised stands_on entry; accepted forms are `unit(<crate>)`, `integration(<crate>)`, or a node id containing `::` such as `rust:backend-store::wal::replays_torn_tail`; crate names use only a-z, 0-9, `_` and `-`
+ --> tests/ui/fail/bad_stands_on_form.rs:3:13
+  |
+3 | #[stands_on("backend-store")]
+  |             ^^^^^^^^^^^^^^^
+
+error: `Backend Store` is not a crate name inside `unit(..)`; accepted forms are `unit(<crate>)`, `integration(<crate>)`, or a node id containing `::` such as `rust:backend-store::wal::replays_torn_tail`; crate names use only a-z, 0-9, `_` and `-`
+ --> tests/ui/fail/bad_stands_on_form.rs:6:13
+  |
+6 | #[stands_on("unit(Backend Store)")]
+  |             ^^^^^^^^^^^^^^^^^^^^^

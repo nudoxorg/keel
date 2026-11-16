@@ -1,0 +1,18 @@
+[package]
+name = "keel-infer"
+description = "Inference core: explain failures with the fewest attributes, and plan test order by doubt removed per second"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The serde feature is what lets `Attr` (which holds a bitmap) derive Serialize.
+roaring = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }

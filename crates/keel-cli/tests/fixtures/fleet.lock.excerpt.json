@@ -1,0 +1,86 @@
+{
+  "edges": {
+    "alerts-to-mail": {
+      "call": {
+        "credential": {
+          "kind": "password",
+          "secret": "example-smtp-password",
+          "user": "alerts@example.test"
+        },
+        "expect": "235 to AUTH, then 250 to RCPT",
+        "protocol": "smtp-starttls",
+        "request": "EHLO mail.example.test, STARTTLS, AUTH PLAIN, MAIL FROM:<alerts@example.test> RCPT TO:<ops@example.test>",
+        "unit": "alert-sender.service",
+        "wrong": {
+          "change": "AUTH with a password other than the configured mailbox password",
+          "expect": "535"
+        }
+      },
+      "domain": "mail-example",
+      "from": {
+        "host": "monitoring",
+        "service": "alert-sender"
+      },
+      "listener": "submission",
+      "to": {
+        "host": "mail-host",
+        "service": "smtp"
+      },
+      "via": "name",
+      "why": "The monitoring service submits alerts through the configured mail relay."
+    },
+    "auth-to-identity-discovery": {
+      "call": {
+        "credential": {
+          "kind": "none"
+        },
+        "expect": "\"issuer\":\"https://auth.example.test\"",
+        "protocol": "https",
+        "request": "GET /.well-known/openid-configuration for auth.example.test",
+        "unit": "example-auth.service",
+        "wrong": {
+          "change": "the same request for a name no vhost serves (wrong-vhost.invalid)",
+          "expect": "404 from Traefik's catch-all"
+        }
+      },
+      "domain": "auth-example",
+      "from": {
+        "host": "app-host",
+        "service": "auth"
+      },
+      "listener": "websecure",
+      "to": {
+        "host": "app-host",
+        "service": "server"
+      },
+      "via": "name",
+      "why": "OIDC discovery and token exchange use the configured public issuer URL."
+    },
+    "tasks-to-store": {
+      "call": {
+        "credential": {
+          "kind": "none"
+        },
+        "expect": "StoreDir: /nix/store",
+        "protocol": "http",
+        "request": "GET /nix-cache-info",
+        "unit": "build-worker.service",
+        "wrong": {
+          "change": "the same request from a task container to a bridge port not open to containers",
+          "expect": "no connection: the host firewall drops it on the task bridge"
+        }
+      },
+      "from": {
+        "host": "build-host",
+        "service": "runner"
+      },
+      "listener": "http",
+      "to": {
+        "host": "build-host",
+        "service": "cache"
+      },
+      "via": "bridge",
+      "why": "Build tasks substitute an artifact cached by an earlier host job."
+    }
+  }
+}

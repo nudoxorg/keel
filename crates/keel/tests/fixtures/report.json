@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "run_id": "01JD…", "repo": "Nudox/Backend",
+  "revision": "7ab31d0…", "head": "9f1c2e0…", "base": "4b841ca…",
+  "platform": { "triple": "x86_64-unknown-linux-gnu", "toolchain": "rustc 1.97.1 (…)",
+                "emulator": null, "net": "isolated" },
+  "verdict": "fail",
+  "started_at": "2026-11-14T08:12:03Z", "duration_ms": 235400,
+  "budget": { "limit_ms": 600000, "critical_path_ms": 161000, "critical_path": ["rust:…", "…"] },
+  "stages": { "stage0_ms": 3100, "build_ms": 48900, "key_ms": 2700, "run_ms": 182600 },
+  "counts": { "pass": 1909, "fail": 1, "blocked": 2, "cached": 16438, "flaky": 0,
+              "skipped": 0, "quarantined": 3, "timeout": 0, "error": 0 },
+  "roots": ["rust:backend-store::wal_replay::replays_torn_tail"],
+  "nodes": [
+    { "id": "rust:backend-store::wal_replay::replays_torn_tail", "key": "blake3:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "status": "fail", "blocked_by": [], "duration_ms": 1200, "attempt": 1,
+      "detail": { "ran": "replays_torn_tail", "expected": "tail.len() == 0", "actual": "tail.len() == 17" },
+      "evidence": [ { "name": "stderr", "ref": "blake3:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2" }, { "name": "stdout", "ref": "blake3:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" } ] },
+    { "id": "rust:backend-flow::arrangements::retains_rows", "key": "blake3:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+      "status": "blocked", "blocked_by": ["rust:backend-store::wal_replay::replays_torn_tail"] },
+    { "id": "rust:backend-engine::rust_corpus::twenty_real_crates…", "key": "blake3:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+      "status": "cached", "cached_from": "01JC…" },
+    { "id": "nix:scenario:backend-mcp-serves!wrong-port", "key": "sha256:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+      "status": "fail", "reason": "control-did-not-fail",
+      "detail": { "ran": "curl http://127.0.0.1:1/health", "expected": "connection refused", "actual": "200 OK" },
+      "evidence": [ { "name": "unit:backend-mcp.service", "ref": "blake3:0707070707070707070707070707070707070707070707070707070707070707" },
+                    { "name": "journal:backend-mcp.service", "ref": "blake3:1818181818181818181818181818181818181818181818181818181818181818" } ] }
+  ],
+  "flaky": [ { "id": "rust:backend-flow::timing::settles", "key": "blake3:2929292929292929292929292929292929292929292929292929292929292929", "attempts": [ {"status": "fail", "evidence": [ { "name": "stderr", "ref": "blake3:3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a" } ]}, {"status": "pass", "evidence": [ { "name": "stderr", "ref": "blake3:4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b" } ]} ] } ],
+  "interactions": [ { "interaction": ["crate:backend-engine", "crate:backend-store"], "source": "cargo", "nodes": 14 },
+                    { "interaction": ["service:nudox-auth", "edge:auth-to-zitadel-oidc"], "source": "fleet.lock.json", "nodes": 0 } ]
+}

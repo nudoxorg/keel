@@ -1,0 +1,68 @@
+# NuDox observations for harness order
+
+`keel-judge guidance --manifest manifest.json --inputs inputs.json -o order.json`
+produces the full case inventory in an order accepted by the harness. It never
+selects, caches, or passes a case. This interface does not establish that a
+change is unrelated to a test; every case remains necessary.
+
+The inputs file is schema 1:
+
+```json
+{"schema":1,"changes":["src/example.rs"],"observations":[{
+  "case":"case-id", "coordinate":"<exact coordinate from NuDox>",
+  "before":"before.json", "graph":"graph.json", "source":"source.json",
+  "after":"after.json"
+}]}
+```
+
+Paths to captures are relative to inputs.json. Capture `backend.status` at
+`detail=full` immediately before and after `backend.graph` and
+`backend.source`, retaining the exact structured JSON responses. Graph pages
+with a continuation are currently unknown; do not discard a continuation and
+claim completeness. Changes must be normalized project-relative paths for the
+same indexed project. Each observed case must be bound by the caller to a
+relevant coordinate; the adapter cannot verify that association or prove that
+status captures bracket a graph returned from the same owner. The raw captures'
+BLAKE3 hashes are in the output for audit. Capture freshness against the actual
+working tree and change list is the caller's responsibility.
+
+A matching changed graph path moves a case earlier, then the count of distinct
+changed declaration coordinates breaks ties. This counts returned declaration
+rows, not graph edges. `dependency_complexity` and `blast_radius` are null:
+`backend.graph`'s rows do not identify edge endpoints or directions. The NuDox
+implementation explicitly says completed graph pagination does not certify
+relation coverage (`crates/present/drive.rs`, `graph_page_records`). Even an
+untruncated page therefore cannot establish callers, SCCs, reach, complexity,
+or blast radius. `backend.references` can carry typed source sites and relation
+kinds (`crates/present/product.rs`, `reference_row`), but the observed response
+does not carry a machine-readable view root or completeness; it cannot be safely
+joined across snapshots by this adapter. These are product evidence gaps, not
+zero values. Coverage and confidence remain unmeasured. Missing,
+partial, stale-looking, unbound and nonmatching observations are unknown. An
+unavailable/malformed capture fails guidance generation; the harness can run
+its entire inventory without an order. No empirical claim of speedup or
+improvement over another fuzzer follows from this ordering.
+
+A case observation may additionally list `related` JSON capture paths. These
+must be full, unwithheld single-page `backend.related` responses with the
+`related_basis` and endpoint IDs introduced by backend commit bfd1c27d94.
+All pages must share the full source basis and semantic revision, match the
+bracketing status view root, and contain the requested case coordinate as a
+center. Paged results are unknown until continuation verification is supported.
+Malformed or mismatched related evidence makes that case unknown. Captures are
+hashed in the evidence list after the four original responses.
+
+Only compiler-confidence `calls` and `method-call` relations participate.
+Distinct edges, direct callers, and reverse reachable callers are lower bounds
+on that captured relation set. SCC count and maximum reverse shortest depth
+describe the **observed subgraph only**: adding edges can change either in both
+directions. The adapter orders cases with observed forward paths to changed
+declarations first. This is a scheduling hint; an absent path proves nothing,
+case-to-coordinate bindings remain caller supplied, and global complexity,
+blast radius, coverage and confidence remain unknown. The graph analysis has a
+512-node / 10,000-edge bound and refuses larger captures.
+
+The CLI integration tests use independently authored synthetic protocol
+fixtures under `crates/keel-judge/tests/data/nudox-example`. They check the
+adapter's behavior for these response shapes; they are not evidence that a
+running NuDox server has been exercised.

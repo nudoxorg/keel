@@ -1,0 +1,105 @@
+# Hand-written: one sample of every keel_judge metric, to run check.nu
+# against before a real textfile from the service exists. Values are
+# placeholders; only the names and labels matter to the check.
+# HELP keel_judge_info Build information; always 1.
+# TYPE keel_judge_info gauge
+keel_judge_info{version="0.1.0"} 1
+# HELP keel_judge_start_time_seconds Unix time the process started.
+# TYPE keel_judge_start_time_seconds gauge
+keel_judge_start_time_seconds 1.7633e9
+# HELP keel_judge_metrics_written_timestamp_seconds Unix time of the last write of this file.
+# TYPE keel_judge_metrics_written_timestamp_seconds gauge
+keel_judge_metrics_written_timestamp_seconds 1.7633e9
+# HELP keel_judge_workers Worker threads configured.
+# TYPE keel_judge_workers gauge
+keel_judge_workers 4
+# HELP keel_judge_workers_busy Workers running a quantum now.
+# TYPE keel_judge_workers_busy gauge
+keel_judge_workers_busy 3
+# HELP keel_judge_quantum_seconds Length of one fuzzing quantum.
+# TYPE keel_judge_quantum_seconds gauge
+keel_judge_quantum_seconds 60
+# HELP keel_judge_quanta_total Quanta run over the state log's whole history.
+# TYPE keel_judge_quanta_total counter
+keel_judge_quanta_total 120
+# HELP keel_judge_fuzz_seconds_total Seconds fuzzed over the state log's whole history.
+# TYPE keel_judge_fuzz_seconds_total counter
+keel_judge_fuzz_seconds_total 7200
+# HELP keel_judge_execs_total Executions over the state log's whole history.
+# TYPE keel_judge_execs_total counter
+keel_judge_execs_total 4.2e7
+# HELP keel_judge_state_damaged_lines Lines of a damaged state log dropped at the last start.
+# TYPE keel_judge_state_damaged_lines gauge
+keel_judge_state_damaged_lines 0
+# HELP keel_judge_disk_waits_total Times a worker waited for free disk, since process start.
+# TYPE keel_judge_disk_waits_total counter
+keel_judge_disk_waits_total 0
+# HELP keel_judge_target_rank Complexity times gap times blast, from the fuzz bundle.
+# TYPE keel_judge_target_rank gauge
+keel_judge_target_rank{target="parse-header"} 12
+# HELP keel_judge_target_rate Recent new coverage features per second, decayed.
+# TYPE keel_judge_target_rate gauge
+keel_judge_target_rate{target="parse-header"} 0.25
+# HELP keel_judge_target_index Rank times rate; what the scheduler picks by.
+# TYPE keel_judge_target_index gauge
+keel_judge_target_index{target="parse-header"} 3
+# HELP keel_judge_target_quanta_total Quanta run on the target.
+# TYPE keel_judge_target_quanta_total counter
+keel_judge_target_quanta_total{target="parse-header"} 40
+# HELP keel_judge_target_fuzz_seconds_total Seconds fuzzed on the target.
+# TYPE keel_judge_target_fuzz_seconds_total counter
+keel_judge_target_fuzz_seconds_total{target="parse-header"} 2400
+# HELP keel_judge_target_execs_total Executions on the target.
+# TYPE keel_judge_target_execs_total counter
+keel_judge_target_execs_total{target="parse-header"} 1.4e7
+# HELP keel_judge_target_features libFuzzer ft: coverage features found.
+# TYPE keel_judge_target_features gauge
+keel_judge_target_features{target="parse-header"} 812
+# HELP keel_judge_target_exec_per_second Executions per second in the last quantum.
+# TYPE keel_judge_target_exec_per_second gauge
+keel_judge_target_exec_per_second{target="parse-header"} 5800
+# HELP keel_judge_target_features_per_hour New coverage features per hour.
+# TYPE keel_judge_target_features_per_hour gauge
+keel_judge_target_features_per_hour{target="parse-header"} 14
+# HELP keel_judge_target_share Fraction of all fuzz time spent on the target.
+# TYPE keel_judge_target_share gauge
+keel_judge_target_share{target="parse-header"} 0.33
+# HELP keel_judge_target_corpus_files Files in the target's corpus.
+# TYPE keel_judge_target_corpus_files gauge
+keel_judge_target_corpus_files{target="parse-header"} 230
+# HELP keel_judge_target_last_quantum_timestamp_seconds Unix time the target's last quantum ended.
+# TYPE keel_judge_target_last_quantum_timestamp_seconds gauge
+keel_judge_target_last_quantum_timestamp_seconds{target="parse-header"} 1.7633e9
+# HELP keel_judge_target_open_findings Findings recorded against the target and not retired.
+# TYPE keel_judge_target_open_findings gauge
+keel_judge_target_open_findings{target="parse-header"} 1
+# HELP keel_judge_target_blocked 1 when a finding is recorded against the current binary, so it is not scheduled.
+# TYPE keel_judge_target_blocked gauge
+keel_judge_target_blocked{target="parse-header"} 0
+# HELP keel_judge_target_faulted 1 when the supervisor could not run the target and is backing off.
+# TYPE keel_judge_target_faulted gauge
+keel_judge_target_faulted{target="parse-header"} 0
+# HELP keel_judge_target_faults_total Supervisor faults on the target since process start.
+# TYPE keel_judge_target_faults_total counter
+keel_judge_target_faults_total{target="parse-header"} 0
+# HELP keel_judge_target_outcomes_total Quanta by how they ended.
+# TYPE keel_judge_target_outcomes_total counter
+keel_judge_target_outcomes_total{target="parse-header",outcome="ok"} 39
+keel_judge_target_outcomes_total{target="parse-header",outcome="crash"} 1
+# HELP keel_judge_target_chosen_total Quanta by how the target was chosen.
+# TYPE keel_judge_target_chosen_total counter
+keel_judge_target_chosen_total{target="parse-header",chosen_by="cold"} 1
+keel_judge_target_chosen_total{target="parse-header",chosen_by="starved"} 3
+keel_judge_target_chosen_total{target="parse-header",chosen_by="index"} 36
+# HELP keel_judge_findings Distinct findings by kind.
+# TYPE keel_judge_findings gauge
+keel_judge_findings{target="parse-header",kind="crash"} 1
+# HELP keel_judge_finding_sightings_total Times a finding of the kind was seen again.
+# TYPE keel_judge_finding_sightings_total counter
+keel_judge_finding_sightings_total{target="parse-header",kind="crash"} 2
+# HELP keel_judge_finding_first_seen_timestamp_seconds Unix time a distinct finding was first seen.
+# TYPE keel_judge_finding_first_seen_timestamp_seconds gauge
+keel_judge_finding_first_seen_timestamp_seconds{target="parse-header",kind="crash",key="a1b2c3d4"} 1.7633e9
+# HELP keel_judge_findings_unparsed_time Findings whose first-seen time could not be parsed.
+# TYPE keel_judge_findings_unparsed_time gauge
+keel_judge_findings_unparsed_time 0
