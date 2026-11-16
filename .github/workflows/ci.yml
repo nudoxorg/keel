@@ -36,6 +36,8 @@ jobs:
           restore-keys: ${{ runner.os }}-rust-
       - name: Compile standalone workspace
         run: cargo check --locked --workspace --bins --lib
+      - name: Validate filtered VM workspace source
+        run: nix/tests/vm-workspace-source.sh
       - name: Process custody and failure propagation
         run: cargo test --locked -p backend-keel-harness --test driver
       - name: Delegated cgroup contains a new session
