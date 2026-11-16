@@ -7,8 +7,8 @@
   },
   "detail": "full",
   "identity": {
-    "coordinate": "/workspace/example::semantic::32f91616289bdf91d63eeaa3a452aee630f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
-    "key": "7febf255",
+    "coordinate": "/workspace/example::semantic::8e4e2a6cee134d0e96499e78e579291930f8ec2a21e488c40ef03abccb0322cc::keel_fanout_target",
+    "key": "4bb55ded",
     "line": 1,
     "name": "keel_fanout_target",
     "path": "src/lib.rs",
@@ -18,7 +18,7 @@
     ],
     "semantic_data": {
       "kind": "selected-symbol-id",
-      "value": "7febf255dc381881960100d39dd16f66e8de72fd4f4aeaf71219c699196057b6"
+      "value": "4bb55dede52b3e6c4fa4eb8e28991b9b534d523f2caedfac63d42cfca9187c77"
     },
     "shape": "semantic",
     "trail": "project \u203a src/lib.rs:1 \u203a keel_fanout_target"

@@ -249,7 +249,7 @@ fn typed_edges_reject_stale_source_and_wrong_seed_identity() {
         "manifest.json",
         "inputs.json",
         "before.json",
-        "after-synthetic.json",
+        "after.json",
         "graph.json",
         "source.json",
         "related.json",
@@ -277,14 +277,14 @@ fn typed_edges_reject_stale_source_and_wrong_seed_identity() {
     std::fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
     assert!(invoke()["evidence"][0]["related_metrics"].is_null());
     std::fs::copy(fixture.join("source.json"), &source_path).unwrap();
-    let after_path = tmp.path().join("after-synthetic.json");
+    let after_path = tmp.path().join("after.json");
     let mut after: Value = serde_json::from_slice(&std::fs::read(&after_path).unwrap()).unwrap();
     after["source"] = "ab".repeat(32).into();
     std::fs::write(after_path, serde_json::to_vec(&after).unwrap()).unwrap();
     assert!(invoke()["evidence"][0]["related_metrics"].is_null());
     std::fs::copy(
-        fixture.join("after-synthetic.json"),
-        tmp.path().join("after-synthetic.json"),
+        fixture.join("after.json"),
+        tmp.path().join("after.json"),
     )
     .unwrap();
     let related_path = tmp.path().join("related.json");
@@ -303,7 +303,7 @@ fn changed_endpoint_requires_explicit_matching_project_and_selected_id() {
         "manifest.json",
         "inputs.json",
         "before.json",
-        "after-synthetic.json",
+        "after.json",
         "graph.json",
         "source.json",
         "related.json",

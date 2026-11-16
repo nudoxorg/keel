@@ -69,7 +69,6 @@ blast radius, coverage and confidence remain unknown. The graph analysis has a
 512-node / 10,000-edge bound and refuses larger captures.
 
 The CLI tests include independently authored synthetic protocol controls and
-sanitized responses from an official 189f backend fanout run. That run did not
-capture a trailing status: its fixture explicitly substitutes a synthetic copy
-for the second status and does not prove a bracketed real-world observation.
-See the fixture README for provenance.
+sanitized, status-bracketed responses from an official 189f backend fanout run.
+See the fixture README for provenance. The run does not establish complete
+relation coverage or predict scheduling performance.
