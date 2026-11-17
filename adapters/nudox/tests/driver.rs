@@ -1079,7 +1079,7 @@ fn related_pages_keep_repeated_context_but_reject_graph_and_basis_conflicts() {
         for binary in [&daemon, &cli, &peer] {
             fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let case = json!({"id":"related","language":"rust","steps":[{"id":"pages","kind":"pages","tool":tool,"arguments":{},"minimum_pages":2,"expect":{"exit":0,"json":[{"pointer":"/records","select":"/identity/coordinate","set_equals":["center","a","b"]},{"pointer":"/edges/1/from","equals":"b"}]}}]});
+        let case = json!({"id":"related","language":"rust","steps":[{"id":"pages","kind":"pages","tool":tool,"arguments":{},"minimum_pages":2,"bind":{"center":"/records/0/identity/coordinate"},"expect":{"exit":0,"json":[{"pointer":"/records","select":"/identity/coordinate","set_equals":["center","a","b"]},{"pointer":"/edges/1/from","equals":"b"}]}},{"id":"binding","kind":"process","binary":"probe","args":["-c","printf %s \"$1\"","_","${center}"],"expect":{"exit":0,"stdout_contains":["center"]}}]});
         let output = world.invoke(&manifest(vec![case]), &[]);
         assert_eq!(
             output.status.code(),
@@ -1111,5 +1111,185 @@ fn related_pages_keep_repeated_context_but_reject_graph_and_basis_conflicts() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let identity = json!(vec![7; 32]);
+    let page = |text: &str, start, end, cursor: Option<&str>| {
+        let mut p = json!({"source":{"text":text,"start":start,"end":end,"total":11,"scope":"native_primary_declaration","source_identity":identity,"owner_start":8192,"owner_end":8203,"source_policy":{"observed":start}}});
+        if let Some(cursor) = cursor {
+            p["nextCursor"] = json!(cursor);
+            p["continuation_call"] = json!({"name":"backend.source","arguments":{"coordinate":"target","byte_range":true,"cursor":cursor}});
+        }
+        p
+    };
+    for mutation in [
+        "valid",
+        "mcp-only",
+        "gap",
+        "overlap",
+        "utf8-byte-count",
+        "oversized",
+        "identity",
+        "bad-identity",
+        "total",
+        "scope",
+        "extent",
+        "zero-progress",
+        "missing-cursor",
+        "wrong-continuation",
+        "loop",
+        "cli-mismatch",
+        "cli-loop",
+    ] {
+        let world = Sandbox::new();
+        let mut first = page("é漢", 0, 5, Some("mcp-next"));
+        let mut second = page("🦀\r\n", 5, 11, None);
+        match mutation {
+            "gap" => second["source"]["start"] = json!(6),
+            "overlap" => second["source"]["start"] = json!(4),
+            "utf8-byte-count" => first["source"]["end"] = json!(2),
+            "oversized" => {
+                first["source"]["text"] = json!("x".repeat(4097));
+                first["source"]["end"] = json!(4097);
+                first["source"]["total"] = json!(4103);
+                first["source"]["owner_end"] = json!(12295);
+            }
+            "identity" => second["source"]["source_identity"] = json!(vec![8; 32]),
+            "bad-identity" => second["source"]["source_identity"] = json!([7, 8]),
+            "total" => {
+                second["source"]["total"] = json!(12);
+                second["source"]["owner_end"] = json!(8204);
+            }
+            "scope" => second["source"]["scope"] = json!("unknown"),
+            "extent" => second["source"]["owner_end"] = json!(8204),
+            "zero-progress" => {
+                second["source"]["text"] = json!("");
+                second["source"]["end"] = json!(5);
+            }
+            "missing-cursor" => {
+                first.as_object_mut().unwrap().remove("nextCursor");
+            }
+            "wrong-continuation" => {
+                first["continuation_call"]["arguments"]["cursor"] = json!("foreign")
+            }
+            "loop" => {
+                first["source"]["total"] = json!(16);
+                first["source"]["owner_end"] = json!(8208);
+                second["source"]["total"] = json!(16);
+                second["source"]["owner_end"] = json!(8208);
+                second["nextCursor"] = json!("mcp-next");
+                second["continuation_call"] = first["continuation_call"].clone();
+            }
+            _ => {}
+        }
+        let mut cli_first = page("é漢", 0, 5, Some("cli-next"));
+        cli_first
+            .as_object_mut()
+            .unwrap()
+            .remove("continuation_call");
+        let mut cli_second = page("🦀\r\n", 5, 11, None);
+        if mutation == "cli-mismatch" {
+            cli_second["source"]["text"] = json!("🦀xx");
+        }
+        if mutation == "cli-loop" {
+            cli_first["source"]["total"] = json!(16);
+            cli_first["source"]["owner_end"] = json!(8208);
+            cli_second["source"]["total"] = json!(16);
+            cli_second["source"]["owner_end"] = json!(8208);
+            cli_second["nextCursor"] = json!("cli-next");
+        }
+        let mcp_data = world.0.join("mcp-pages.json");
+        let cli_data = world.0.join("cli-pages.json");
+        fs::write(&mcp_data, json!([first, second]).to_string()).unwrap();
+        fs::write(&cli_data, json!([cli_first, cli_second]).to_string()).unwrap();
+        let daemon = world.0.join("bins/backend-locald");
+        fs::write(&daemon,"#!/usr/bin/python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
+        let cli = world.0.join("bins/backend-cli");
+        fs::write(&cli,format!("#!/usr/bin/python3\nimport json,sys\np=json.load(open({:?}))\ni=1 if '--cursor' in sys.argv else 0\nprint(json.dumps({{'declaration_source_range':p[i]}}))\n",cli_data.to_str().unwrap())).unwrap();
+        let mcp = world.0.join("bins/backend-mcp");
+        fs::write(&mcp,format!("#!/usr/bin/python3\nimport json,sys\np=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':p[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",mcp_data.to_str().unwrap())).unwrap();
+        for bin in [&daemon, &cli, &mcp] {
+            fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut case = json!({"id":"source","language":"typescript","steps":[
+          {"id":"read","kind":"pages","page_format":"source-range","tool":"backend.source","arguments":{"coordinate":"target","byte_range":true},"cli":["source","target","--byte-range"],"minimum_pages":2,"bind":{"joined":"/text"},"expect":{"exit":0,"json":[{"pointer":"/text","equals":"é漢🦀\r\n"},{"pointer":"/bytes","equals":11},{"pointer":"/scope","equals":"native_primary_declaration"},{"pointer":"/source_policies","equals":[{"observed":0},{"observed":5}]}]}},
+          {"id":"bound","kind":"process","binary":"probe","args":["-c","printf %s \"$1\"","_","${joined}"],"expect":{"exit":0,"stdout_contains":["é漢🦀\r\n"]}}
+        ]});
+        if mutation == "mcp-only" {
+            case["steps"][0].as_object_mut().unwrap().remove("cli");
+        }
+        let output = world.invoke(&manifest(vec![case]), &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(if mutation == "valid" || mutation == "mcp-only" {
+                0
+            } else {
+                1
+            }),
+            "{mutation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if mutation == "valid" || mutation == "mcp-only" {
+            let report = world.report();
+            let detail = &report["cases"][0]["steps"][0]["detail"];
+            assert_eq!(detail["page_receipts"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                detail["cli_page_receipts"].as_array().unwrap().len(),
+                if mutation == "valid" { 2 } else { 0 }
+            );
+            assert_eq!(
+                detail["page_receipts"][0]["pid"],
+                detail["page_receipts"][1]["pid"]
+            );
+            for i in 0..2 {
+                for (field, file) in [
+                    ("request_sha256", format!("000-read.page-{i}.request.json")),
+                    ("reply_sha256", format!("000-read.page-{i}.json")),
+                ] {
+                    let bytes = fs::read(world.0.join("evidence/source").join(file)).unwrap();
+                    assert_eq!(
+                        detail["page_receipts"][i][field],
+                        json!(format!("{:x}", Sha256::digest(bytes)))
+                    );
+                }
+                if mutation == "mcp-only" {
+                    continue;
+                }
+                for (field, file) in [
+                    (
+                        "request_sha256",
+                        format!("000-read.cli-page-{i}.request.json"),
+                    ),
+                    ("reply_sha256", format!("000-read.cli-page-{i}.stdout")),
+                ] {
+                    let bytes = fs::read(world.0.join("evidence/source").join(file)).unwrap();
+                    assert_eq!(
+                        detail["cli_page_receipts"][i][field],
+                        json!(format!("{:x}", Sha256::digest(bytes)))
+                    );
+                }
+            }
+        }
+    }
+    for step in [
+        json!({"id":"bad","kind":"restart","page_format":"source-range"}),
+        json!({"id":"bad","kind":"restart","page_format":null}),
+        json!({"id":"bad","kind":"pages","page_format":"source-range","tool":"backend.search","arguments":{"byte_range":true},"expect":{"exit":0,"stdout_contains":["x"]}}),
+        json!({"id":"bad","kind":"pages","page_format":"source-range","tool":"backend.source","arguments":{"byte_range":false},"expect":{"exit":0,"stdout_contains":["x"]}}),
+    ] {
+        let world = Sandbox::new();
+        let output = world.invoke(
+            &manifest(vec![
+                json!({"id":"invalid","language":"rust","steps":[step]}),
+            ]),
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!world.0.join("evidence").exists());
     }
 }

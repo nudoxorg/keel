@@ -69,8 +69,13 @@ pub(crate) struct Step {
     pub minimum_pages: usize,
     #[serde(default = "max_pages")]
     pub maximum_pages: usize,
+    #[serde(default, deserialize_with = "present_format")]
+    pub page_format: Option<String>,
     #[serde(default)]
     pub wait_for: bool,
+}
+fn present_format<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some)
 }
 fn one() -> usize {
     1
@@ -249,6 +254,31 @@ impl Manifest {
             let mut steps = BTreeSet::new();
             let mut sessions = BTreeSet::new();
             for step in &case.steps {
+                match (step.kind.as_str(), step.page_format.as_deref()) {
+                    (_, None) => {}
+                    ("pages", Some("source-range"))
+                        if step.tool == "backend.source"
+                            && step.arguments["byte_range"] == true
+                            && step.arguments.get("cursor").is_none()
+                            && (step.cli.is_empty()
+                                || (step.cli.first().is_some_and(|v| v == "source")
+                                    && step.cli.iter().any(|v| v == "--byte-range")
+                                    && !step.cli.iter().any(|v| {
+                                        v == "--cursor" || v.starts_with("--cursor=")
+                                    }))) => {}
+                    _ => {
+                        return Err(format!(
+                            "{}: invalid page_format or source-range selector",
+                            step.id
+                        ));
+                    }
+                }
+                if step.kind == "pages" && step.page_format.is_none() && !step.cli.is_empty() {
+                    return Err(format!(
+                        "{}: CLI pagination requires source-range format",
+                        step.id
+                    ));
+                }
                 let is_session =
                     matches!(step.kind.as_str(), "mcp-start" | "mcp-call" | "mcp-stop");
                 if !is_session
