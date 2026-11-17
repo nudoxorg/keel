@@ -856,9 +856,18 @@ impl World {
         let mut call = json!({"name":step.tool,"arguments":self.expand_json(&step.arguments)?});
         let original_arguments = call["arguments"].clone();
         let expected_selected = crate::source_pages::requested_symbol(&original_arguments)?;
+        let expected_coordinate = match original_arguments.get("coordinate") {
+            None => None,
+            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => return Err("source requested coordinate malformed".into()),
+        };
         let mut frozen_selector = None::<serde_json::Map<String, Value>>;
         let mut visited = BTreeSet::new();
-        let mut aggregate = crate::source_pages::SourcePages::new(expected_selected.clone(), false);
+        let mut aggregate = crate::source_pages::SourcePages::new(
+            expected_selected.clone(),
+            expected_coordinate.clone(),
+            false,
+        );
         let mut receipts = Vec::new();
         loop {
             let n = receipts.len();
@@ -942,7 +951,8 @@ impl World {
         let mut value = aggregate.finish()?;
         let mut cli_receipts = Vec::new();
         if !step.cli.is_empty() {
-            let mut cli_pages = crate::source_pages::SourcePages::new(expected_selected, true);
+            let mut cli_pages =
+                crate::source_pages::SourcePages::new(expected_selected, expected_coordinate, true);
             let mut cursor = None::<String>;
             let mut seen = BTreeSet::new();
             loop {

@@ -1154,6 +1154,7 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         "invalid-request-id",
         "wrong-request-kind",
         "coordinate-drift",
+        "wrong-first-coordinate",
         "request-selected-mismatch",
         "revision-cross-transport",
         "selected-cross-transport",
@@ -1217,6 +1218,10 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
                     json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
             }
             "coordinate-drift" => second["coordinate"] = json!("foreign"),
+            "wrong-first-coordinate" => {
+                first["coordinate"] = json!("foreign");
+                second["coordinate"] = json!("foreign");
+            }
             "request-selected-mismatch" => {
                 first["selected_symbol"] =
                     json!("2222222222222222222222222222222222222222222222222222222222222222");

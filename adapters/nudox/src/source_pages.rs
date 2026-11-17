@@ -44,6 +44,7 @@ pub(crate) fn requested_symbol(arguments: &Value) -> Result<Option<String>, Stri
 
 pub(crate) struct SourcePages {
     expected_selected: Option<String>,
+    expected_coordinate: Option<String>,
     cli: bool,
     text: String,
     end: u64,
@@ -52,9 +53,14 @@ pub(crate) struct SourcePages {
     pages: Vec<Value>,
 }
 impl SourcePages {
-    pub(crate) fn new(expected_selected: Option<String>, cli: bool) -> Self {
+    pub(crate) fn new(
+        expected_selected: Option<String>,
+        expected_coordinate: Option<String>,
+        cli: bool,
+    ) -> Self {
         Self {
             expected_selected,
+            expected_coordinate,
             cli,
             text: String::new(),
             end: 0,
@@ -85,6 +91,13 @@ impl SourcePages {
             Some(Value::String(s)) if !s.is_empty() => json!(s),
             _ => return Err("source coordinate malformed".into()),
         };
+        if self
+            .expected_coordinate
+            .as_ref()
+            .is_some_and(|expected| coordinate.as_str() != Some(expected.as_str()))
+        {
+            return Err("source coordinate differs from request".into());
+        }
         let source = page
             .get("source")
             .and_then(Value::as_object)
