@@ -50,7 +50,8 @@ must be full, unwithheld single-page `backend.related` responses with the
 `related_basis` and endpoint IDs introduced by backend commit bfd1c27d94.
 All pages must share the full source basis and semantic revision, match the
 bracketing status view root and source object, and contain the requested case
-coordinate and exact selected source ID as a center. Paged results are unknown until continuation verification is supported.
+coordinate and exact selected source ID as a center. Paged results supplied
+through `related` remain unknown; use the receipt-bound chain form below.
 Malformed or mismatched related evidence makes that case unknown. Captures are
 hashed in the evidence list after the four original responses.
 
@@ -78,7 +79,7 @@ relation coverage or predict scheduling performance.
 For a paginated capture, an observation may provide `related_chains` in addition
 to single-page `related` inputs. Each chain names a trusted driver report,
 passing case step IDs for the bracketing status responses, source response and
-page call, and an ordered array of raw JSON-RPC request and reply paths:
+page call, and an ordered array of driver-persisted JSON-RPC request and reply paths:
 
 ```json
 {"report":"report.json","before_step":"status-before","source_step":"source",
@@ -88,13 +89,15 @@ page call, and an ordered array of raw JSON-RPC request and reply paths:
 ```
 
 The report must bind the exact manifest and raw status/source bytes, and its
-ordered page receipts must bind each raw request and reply by SHA-256, request ID
+ordered page receipts must bind each persisted request and reply by SHA-256, request ID
 and one process ID. The adapter checks each next request against the preceding
 continuation, requires a terminal page, preserves each neighborhood root, and
 rejects conflicting repeated rows or claims and repeated chain edges. Source,
 view, semantic and project scopes must stay stable. A forged or modified
 unsigned report can forge these links: the local driver receipt and owner
 transport are trust inputs, not signatures or offline proof of source membership.
+The driver serializes JSON after exact-key redaction; these files preserve the
+hashed driver captures, not necessarily the original transport bytes.
 Incomplete or unverified chains remain unknown.
 An observation cannot mix `related` and `related_chains`. Each capture is
 limited to 16 MiB, and the combined chain reads for one observation are limited

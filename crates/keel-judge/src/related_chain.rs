@@ -1,4 +1,4 @@
-//! Validate raw paginated captures against a trusted local driver receipt.
+//! Validate driver-persisted paginated captures against a trusted local receipt.
 //! The unsigned receipt and owner channel are trust inputs, not offline signatures.
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
