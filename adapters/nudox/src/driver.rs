@@ -881,8 +881,15 @@ impl World {
             let request_path = prefix.with_extension(format!("page-{n}.request.json"));
             let reply_path = prefix.with_extension(format!("page-{n}.json"));
             write_capture_json(&request_path, &request, self.secret())?;
+            let captured_request: Value = serde_json::from_slice(&read(&request_path)?)
+                .map_err(|e| format!("captured source request is invalid JSON: {e}"))?;
+            if captured_request != request {
+                return Err("captured source request differs after redaction".into());
+            }
             let reply = session.exchange(&request, remaining())?;
             write_capture_json(&reply_path, &reply, self.secret())?;
+            let reply: Value = serde_json::from_slice(&read(&reply_path)?)
+                .map_err(|e| format!("captured source reply is invalid JSON: {e}"))?;
             receipts.push(json!({"pid":session.pid(),"request_id":n+1,"request_sha256":file_hash(&request_path)?,"reply_sha256":file_hash(&reply_path)?}));
             let result = reply.get("result").ok_or("source JSON-RPC fault")?;
             match result.get("isError") {
@@ -914,18 +921,32 @@ impl World {
                         .as_object()
                         .ok_or("source continuation arguments missing")?;
                     if arguments.get("byte_range") != Some(&Value::Bool(true))
-                        || ["coordinate", "selected_symbol", "detail"]
-                            .iter()
-                            .any(|field| {
-                                original_arguments
-                                    .get(*field)
-                                    .is_some_and(|original| arguments.get(*field) != Some(original))
-                            })
+                        || ["coordinate", "detail"].iter().any(|field| {
+                            original_arguments
+                                .get(*field)
+                                .is_some_and(|original| arguments.get(*field) != Some(original))
+                        })
                     {
                         return Err("source continuation changed the requested selector".into());
                     }
+                    let continuation_selected =
+                        crate::source_pages::requested_symbol(&next["arguments"])?;
+                    if expected_selected
+                        .as_ref()
+                        .is_some_and(|expected| continuation_selected.as_ref() != Some(expected))
+                    {
+                        return Err(
+                            "source continuation changed the requested selected symbol".into()
+                        );
+                    }
                     let mut selector = arguments.clone();
                     selector.remove("cursor");
+                    if let Some(selected) = continuation_selected {
+                        selector.insert(
+                            "selected_symbol".into(),
+                            json!({"kind":"selected-symbol-id","value":selected}),
+                        );
+                    }
                     if frozen_selector
                         .as_ref()
                         .is_some_and(|frozen| frozen != &selector)
@@ -979,14 +1000,18 @@ impl World {
                 if output.code != Some(0) {
                     return Err("CLI source page refused".into());
                 }
-                let reply: Value = serde_json::from_slice(&output.stdout)
+                let mut stdout_name = cli_prefix.as_os_str().to_os_string();
+                stdout_name.push(".stdout");
+                let captured = read(Path::new(&stdout_name))?;
+                if captured != output.stdout {
+                    return Err("CLI source capture differs from checked output".into());
+                }
+                let reply: Value = serde_json::from_slice(&captured)
                     .map_err(|e| format!("CLI source page is not JSON: {e}"))?;
                 let page = reply
                     .get("declaration_source_range")
                     .ok_or("CLI source range missing")?;
                 cursor = cli_pages.push(page)?;
-                let mut stdout_name = cli_prefix.as_os_str().to_os_string();
-                stdout_name.push(".stdout");
                 cli_receipts.push(json!({"request_sha256":file_hash(&request_path)?,"reply_sha256":file_hash(Path::new(&stdout_name))?}));
                 if cursor.is_none() {
                     break;

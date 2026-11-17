@@ -1131,6 +1131,7 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         "valid",
         "canonical-addition",
         "legacy-array-id",
+        "legacy-array-wrong",
         "mcp-only",
         "gap",
         "overlap",
@@ -1205,6 +1206,10 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             }
             "wrong-detail" => first["continuation_call"]["arguments"]["detail"] = json!("full"),
             "wrong-opt-in" => first["continuation_call"]["arguments"]["byte_range"] = json!(false),
+            "legacy-array-wrong" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
             "selected-drift" => {
                 second["selected_symbol"] =
                     json!("2222222222222222222222222222222222222222222222222222222222222222")
@@ -1233,10 +1238,6 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
                 second["revision"] = first["revision"].clone();
             }
             "mcp-freshness" => first["freshness"] = json!("unverified"),
-            "legacy-array-id" => {
-                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
-                    json!(vec![17; 32])
-            }
             "selector-drift-later" => {
                 first["source"]["total"] = json!(16);
                 first["source"]["owner_end"] = json!(8208);
@@ -1305,7 +1306,7 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         if mutation == "mcp-only" {
             case["steps"][0].as_object_mut().unwrap().remove("cli");
         }
-        if mutation == "legacy-array-id" {
+        if mutation == "legacy-array-id" || mutation == "legacy-array-wrong" {
             case["steps"][0]["arguments"]["selected_symbol"]["value"] = json!(vec![17; 32]);
         }
         if mutation == "invalid-request-id" {
