@@ -48,6 +48,48 @@ fn nonempty(v: &Value) -> bool {
     v.as_str().is_some_and(|s| !s.is_empty())
 }
 
+pub(crate) fn consistent(groups: &[Vec<Value>]) -> Result<()> {
+    let mut records = BTreeMap::<String, Value>::new();
+    let mut claims = BTreeMap::<String, Value>::new();
+    let mut scope: Option<Value> = None;
+    for page in groups.iter().flatten() {
+        if scope
+            .as_ref()
+            .is_some_and(|prior| *prior != page["related_project_scope"])
+        {
+            bail!("project scope changed across chains");
+        }
+        scope = Some(page["related_project_scope"].clone());
+        if let Some(rows) = page["records"].as_array() {
+            for row in rows {
+                if let Some(id) = crate::guidance::selected_id(&row["identity"]) {
+                    if records
+                        .insert(id, row.clone())
+                        .is_some_and(|prior| prior != *row)
+                    {
+                        bail!("conflicting record across chains");
+                    }
+                }
+            }
+        }
+        if let Some(rows) = page["related_project_attributions"].as_array() {
+            for row in rows {
+                let id = row["row_id"]
+                    .as_str()
+                    .context("claim missing row ID")?
+                    .to_owned();
+                if claims
+                    .insert(id, row.clone())
+                    .is_some_and(|prior| prior != *row)
+                {
+                    bail!("conflicting claim across chains");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn load(
     base: &Path,
     manifest: &Path,

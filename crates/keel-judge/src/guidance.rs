@@ -245,6 +245,7 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                         e.captures_blake3.push(hash);
                     }
                     let mut chain_error = None;
+                    let mut verified_groups = Vec::new();
                     for chain in &o.related_chains {
                         match crate::related_chain::load(
                             base,
@@ -256,7 +257,7 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                             &o.after,
                         ) {
                             Ok((group, hashes)) => {
-                                pages.push(group);
+                                verified_groups.push(group);
                                 e.captures_blake3.extend(hashes);
                             }
                             Err(err) => {
@@ -265,6 +266,12 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                             }
                         }
                     }
+                    if chain_error.is_none() {
+                        if let Err(err) = crate::related_chain::consistent(&verified_groups) {
+                            chain_error = Some(err);
+                        }
+                    }
+                    pages.extend(verified_groups);
                     let seed = selected_id(&source["identity"]);
                     let result = match (chain_error, seed) {
                         (Some(err), _) => Err(err),
