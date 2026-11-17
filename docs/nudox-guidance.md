@@ -96,3 +96,6 @@ view, semantic and project scopes must stay stable. A forged or modified
 unsigned report can forge these links: the local driver receipt and owner
 transport are trust inputs, not signatures or offline proof of source membership.
 Incomplete or unverified chains remain unknown.
+An observation cannot mix `related` and `related_chains`. Each capture is
+limited to 16 MiB, and the combined chain reads for one observation are limited
+to 64 MiB. Each nonterminal page must add a typed edge.

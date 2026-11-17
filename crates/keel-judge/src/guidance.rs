@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 
 #[derive(Deserialize)]
@@ -58,9 +59,25 @@ pub struct Order {
     evidence: Vec<Evidence>,
     note: &'static str,
 }
+pub(crate) const CAPTURE_LIMIT: u64 = 16 * 1024 * 1024;
+pub(crate) fn read_capture(path: &Path) -> Result<Vec<u8>> {
+    read_capture_with_limit(path, CAPTURE_LIMIT)
+}
+pub(crate) fn read_capture_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > limit {
+        bail!("capture exceeds size limit");
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        bail!("capture exceeds size limit");
+    }
+    Ok(bytes)
+}
 fn read_json(base: &Path, path: &str) -> Result<(Value, String)> {
     let p = base.join(path);
-    let bytes = std::fs::read(&p).with_context(|| format!("read capture {}", p.display()))?;
+    let bytes = read_capture(&p).with_context(|| format!("read capture {}", p.display()))?;
     let value =
         serde_json::from_slice(&bytes).with_context(|| format!("parse capture {}", p.display()))?;
     Ok((value, blake3::hash(&bytes).to_hex().to_string()))
@@ -109,8 +126,8 @@ pub(crate) fn selected_id(identity: &Value) -> Option<String> {
 }
 
 pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
-    let manifest: Manifest = serde_json::from_slice(&std::fs::read(manifest_path)?)?;
-    let inputs: Inputs = serde_json::from_slice(&std::fs::read(inputs_path)?)?;
+    let manifest: Manifest = serde_json::from_slice(&read_capture(manifest_path)?)?;
+    let inputs: Inputs = serde_json::from_slice(&read_capture(inputs_path)?)?;
     if manifest.schema != 1 || inputs.schema != 1 {
         bail!("manifest and guidance inputs must have schema 1");
     }
@@ -239,14 +256,26 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                 }
                 if !o.related.is_empty() || !o.related_chains.is_empty() {
                     let mut pages = Vec::new();
-                    for path in &o.related {
-                        let (page, hash) = read_json(base, path)?;
-                        pages.push(vec![page]);
-                        e.captures_blake3.push(hash);
+                    if o.related_chains.is_empty() {
+                        for path in &o.related {
+                            let (page, hash) = read_json(base, path)?;
+                            pages.push(vec![page]);
+                            e.captures_blake3.push(hash);
+                        }
                     }
-                    let mut chain_error = None;
+                    let mut chain_error = if !o.related.is_empty() && !o.related_chains.is_empty() {
+                        Some(anyhow::anyhow!(
+                            "mixed related capture modes are unsupported"
+                        ))
+                    } else {
+                        None
+                    };
                     let mut verified_groups = Vec::new();
+                    let mut chain_budget = 64 * 1024 * 1024u64;
                     for chain in &o.related_chains {
+                        if chain_error.is_some() {
+                            break;
+                        }
                         match crate::related_chain::load(
                             base,
                             manifest_path,
@@ -255,6 +284,7 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                             &o.before,
                             &o.source,
                             &o.after,
+                            &mut chain_budget,
                         ) {
                             Ok((group, hashes)) => {
                                 verified_groups.push(group);

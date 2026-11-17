@@ -24,8 +24,11 @@ pub(crate) struct Page {
     pub reply: String,
 }
 
-fn read(base: &Path, name: &str) -> Result<(Value, String, String)> {
-    let bytes = std::fs::read(base.join(name)).with_context(|| format!("read {name}"))?;
+fn read(base: &Path, name: &str, budget: &mut u64) -> Result<(Value, String, String)> {
+    let limit = (*budget).min(crate::guidance::CAPTURE_LIMIT);
+    let bytes = crate::guidance::read_capture_with_limit(&base.join(name), limit)
+        .with_context(|| format!("read {name} within chain budget"))?;
+    *budget -= bytes.len() as u64;
     let v = serde_json::from_slice(&bytes)?;
     Ok((
         v,
@@ -98,12 +101,18 @@ pub(crate) fn load(
     before: &str,
     source: &str,
     after: &str,
+    budget: &mut u64,
 ) -> Result<(Vec<Value>, Vec<String>)> {
     if c.pages.is_empty() || c.pages.len() > 64 {
         bail!("invalid related chain length");
     }
-    let (report, _, mut hashes) = read(base, &c.report).map(|(v, s, b)| (v, s, vec![b]))?;
-    let manifest_digest = format!("{:x}", Sha256::digest(std::fs::read(manifest)?));
+    let (report, _, mut hashes) = read(base, &c.report, budget).map(|(v, s, b)| (v, s, vec![b]))?;
+    let manifest_bytes = crate::guidance::read_capture_with_limit(
+        manifest,
+        (*budget).min(crate::guidance::CAPTURE_LIMIT),
+    )?;
+    *budget -= manifest_bytes.len() as u64;
+    let manifest_digest = format!("{:x}", Sha256::digest(manifest_bytes));
     if report["schema"] != 1
         || report["status"] != "pass"
         || report["manifest_sha256"] != manifest_digest
@@ -129,7 +138,7 @@ pub(crate) fn load(
         bail!("capture steps are not bracketed");
     }
     for (name, step) in [(before, bs), (source, ss), (after, as_)] {
-        let (_, digest, _) = read(base, name)?;
+        let (_, digest, _) = read(base, name, budget)?;
         if step["detail"]["stdout_sha256"] != digest {
             bail!("capture stdout hash mismatch");
         }
@@ -150,8 +159,8 @@ pub(crate) fn load(
     let mut claims = BTreeMap::<String, Value>::new();
     let mut edges = BTreeSet::new();
     for (i, (page, receipt)) in c.pages.iter().zip(receipts).enumerate() {
-        let (request, rh, rb) = read(base, &page.request)?;
-        let (reply, ph, pb) = read(base, &page.reply)?;
+        let (request, rh, rb) = read(base, &page.request, budget)?;
+        let (reply, ph, pb) = read(base, &page.reply, budget)?;
         hashes.extend([rb, pb]);
         let pid = receipt["pid"]
             .as_u64()
@@ -245,6 +254,7 @@ pub(crate) fn load(
                 }
             }
         }
+        let prior_edges = edges.len();
         for edge in p["edges"].as_array().context("missing edges")? {
             let key = (
                 edge["from_id"].to_string(),
@@ -264,6 +274,9 @@ pub(crate) fn load(
             }
             next = None;
         } else {
+            if edges.len() == prior_edges {
+                bail!("nonterminal page made no edge progress");
+            }
             if p["more"] != true || !p["continuation_call"].is_object() {
                 bail!("missing continuation");
             }

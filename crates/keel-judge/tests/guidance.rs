@@ -580,6 +580,85 @@ fn receipt_bound_related_chain_checks_handoffs_and_source_basis() {
         good["evidence"][0]["related_metrics"]["observed_call_edges"],
         8
     );
+    let mut mixed = inputs.clone();
+    mixed["observations"][0]["related"] = serde_json::json!(["related.json"]);
+    std::fs::write(&inputs_path, serde_json::to_vec(&mixed).unwrap()).unwrap();
+    assert!(
+        run()["evidence"][0]["related_metrics"].is_null(),
+        "mixed capture modes"
+    );
+    std::fs::write(&inputs_path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+    let mut no_progress = replies[0].clone();
+    no_progress["result"]["structuredContent"]["edges"] = serde_json::json!([]);
+    std::fs::write(
+        tmp.path().join("reply0.json"),
+        serde_json::to_vec(&no_progress).unwrap(),
+    )
+    .unwrap();
+    let mut bad = report.clone();
+    bad["cases"][0]["steps"][2]["detail"]["page_receipts"][0]["reply_sha256"] =
+        digest("reply0.json").into();
+    std::fs::write(&report_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    assert!(
+        run()["evidence"][0]["related_metrics"].is_null(),
+        "empty nonterminal page"
+    );
+    std::fs::write(
+        tmp.path().join("reply0.json"),
+        serde_json::to_vec(&replies[0]).unwrap(),
+    )
+    .unwrap();
+    let oversized = std::fs::File::create(tmp.path().join("oversized.json")).unwrap();
+    oversized.set_len(16 * 1024 * 1024 + 1).unwrap();
+    let mut too_large = inputs.clone();
+    too_large["observations"][0]["related_chains"][0]["pages"][0]["request"] =
+        "oversized.json".into();
+    std::fs::write(&inputs_path, serde_json::to_vec(&too_large).unwrap()).unwrap();
+    std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+    assert!(
+        run()["evidence"][0]["related_metrics"].is_null(),
+        "oversized capture"
+    );
+    std::fs::write(&inputs_path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+    let mut empty = replies[0].clone();
+    let empty_page = &mut empty["result"]["structuredContent"];
+    empty_page["edges"] = serde_json::json!([]);
+    empty_page["more"] = false.into();
+    empty_page.as_object_mut().unwrap().remove("nextCursor");
+    empty_page
+        .as_object_mut()
+        .unwrap()
+        .remove("continuation_call");
+    std::fs::write(
+        tmp.path().join("reply0.json"),
+        serde_json::to_vec(&empty).unwrap(),
+    )
+    .unwrap();
+    let mut single = inputs.clone();
+    single["observations"][0]["related_chains"][0]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    std::fs::write(&inputs_path, serde_json::to_vec(&single).unwrap()).unwrap();
+    let mut single_report = report.clone();
+    single_report["cases"][0]["steps"][2]["detail"]["page_receipts"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    single_report["cases"][0]["steps"][2]["detail"]["page_receipts"][0]["reply_sha256"] =
+        digest("reply0.json").into();
+    std::fs::write(&report_path, serde_json::to_vec(&single_report).unwrap()).unwrap();
+    assert_eq!(
+        run()["evidence"][0]["related_metrics"]["observed_call_edges"],
+        0,
+        "empty terminal neighborhood"
+    );
+    std::fs::write(
+        tmp.path().join("reply0.json"),
+        serde_json::to_vec(&replies[0]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&inputs_path, serde_json::to_vec(&inputs).unwrap()).unwrap();
     for field in ["pid", "request_id", "request_sha256", "reply_sha256"] {
         let mut bad = report.clone();
         bad["cases"][0]["steps"][2]["detail"]["page_receipts"][1][field] = Value::Null;
