@@ -9,6 +9,8 @@ mod isolation;
 mod manifest;
 #[cfg(unix)]
 mod process;
+#[cfg(unix)]
+mod related_pages;
 
 fn main() -> std::process::ExitCode {
     #[cfg(unix)]
