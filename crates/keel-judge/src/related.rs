@@ -37,8 +37,8 @@ fn witness_hash(v: &Value) -> bool {
     v.as_str().is_some_and(crate::guidance::valid_selected_id)
 }
 
-pub fn metrics(
-    pages: &[Value],
+pub(crate) fn metrics(
+    pages: &[Vec<Value>],
     source_view: &str,
     source_object: &str,
     coordinate: &str,
@@ -56,131 +56,133 @@ pub fn metrics(
     let mut root = None;
     let mut edges = BTreeSet::<(String, String)>::new();
     let mut rows = Vec::new();
-    for page in pages {
-        let b = page
-            .get("related_basis")
-            .ok_or_else(|| anyhow::anyhow!("missing related basis"))?;
-        if b["schema"] != 1
-            || page["answer"] != "records"
-            || page["more"] != false
-            || page["related_evidence_withheld"] != false
-            || b["relation_coverage"] != "unknown"
-            || page.get("continuation_call").is_some()
-            || page.get("nextCursor").is_some()
-        {
-            bail!("incomplete or withheld related page");
-        }
-        let view = text(b, "source_view_root")?;
-        if !hex(view) || view != source_view {
-            bail!("related view root does not match status");
-        }
-        if text(b, "source_object")? != source_object {
-            bail!("related source object does not match status");
-        }
-        for k in [
-            "source_object",
-            "branch",
-            "log",
-            "semantic_revision",
-            "neighborhood_root",
-        ] {
-            if !hex(text(b, k)?) {
-                bail!("invalid {k}");
+    for group in pages {
+        for (page_index, page) in group.iter().enumerate() {
+            let b = page
+                .get("related_basis")
+                .ok_or_else(|| anyhow::anyhow!("missing related basis"))?;
+            if b["schema"] != 1
+                || page["answer"] != "records"
+                || (group.len() == 1 && page["more"] != false)
+                || page["related_evidence_withheld"] != false
+                || b["relation_coverage"] != "unknown"
+                || (group.len() == 1 && page.get("continuation_call").is_some())
+                || (group.len() == 1 && page.get("nextCursor").is_some())
+            {
+                bail!("incomplete or withheld related page");
             }
-        }
-        if b["source_schema"].as_u64().is_none() || b["sequence"].as_u64().is_none() {
-            bail!("missing source schema/sequence");
-        }
-        let current: Vec<Value> = [
-            "source_view_root",
-            "source_object",
-            "branch",
-            "log",
-            "source_schema",
-            "sequence",
-            "semantic_revision",
-        ]
-        .iter()
-        .map(|k| b[*k].clone())
-        .collect();
-        if basis.as_ref().is_some_and(|x| x != &current) {
-            bail!("related pages have different source or semantic revisions");
-        }
-        basis = Some(current);
-        let center = text(b, "center_id")?;
-        let label = text(b, "coordinate")?;
-        if !id(center) || !centers.insert(center.to_owned()) {
-            bail!("invalid or duplicate center");
-        }
-        if labels
-            .insert(center.into(), label.into())
-            .is_some_and(|old| old != label)
-        {
-            bail!("center label conflict");
-        }
-        if label == coordinate {
-            if root.replace(center.to_owned()).is_some() {
-                bail!("duplicate selected root");
+            let view = text(b, "source_view_root")?;
+            if !hex(view) || view != source_view {
+                bail!("related view root does not match status");
             }
-        }
-        if let Some(records) = page["records"].as_array() {
-            rows.extend(records.iter().cloned().map(|row| {
-                (
-                    row,
-                    page["related_project_scope"].clone(),
-                    page["related_project_attributions"].clone(),
-                    b["semantic_revision"].clone(),
-                )
-            }));
-        }
-        for edge in page["edges"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("missing edges"))?
-        {
-            let from = text(edge, "from_id")?;
-            let to = text(edge, "to_id")?;
-            if !id(from) || !id(to) || (from != center && to != center) {
-                bail!("invalid endpoint or non-incident edge");
+            if text(b, "source_object")? != source_object {
+                bail!("related source object does not match status");
             }
-            for (key, label_key) in [(from, "from"), (to, "to")] {
-                let label = text(edge, label_key)?;
-                if labels
-                    .insert(key.into(), label.into())
-                    .is_some_and(|old| old != label)
-                {
-                    bail!("conflicting endpoint labels");
+            for k in [
+                "source_object",
+                "branch",
+                "log",
+                "semantic_revision",
+                "neighborhood_root",
+            ] {
+                if !hex(text(b, k)?) {
+                    bail!("invalid {k}");
                 }
             }
-            let relation = text(edge, "relation")?;
-            if !matches!(
-                relation,
-                "calls"
-                    | "method-call"
-                    | "type-reference"
-                    | "reads"
-                    | "writes"
-                    | "imports"
-                    | "implements"
-                    | "overrides"
-                    | "reexports"
-                    | "inherits"
-                    | "documents"
-            ) {
-                bail!("invalid relation");
+            if b["source_schema"].as_u64().is_none() || b["sequence"].as_u64().is_none() {
+                bail!("missing source schema/sequence");
             }
-            if edge.get("confidence").is_none() {
-                bail!("missing confidence");
+            let current: Vec<Value> = [
+                "source_view_root",
+                "source_object",
+                "branch",
+                "log",
+                "source_schema",
+                "sequence",
+                "semantic_revision",
+            ]
+            .iter()
+            .map(|k| b[*k].clone())
+            .collect();
+            if basis.as_ref().is_some_and(|x| x != &current) {
+                bail!("related pages have different source or semantic revisions");
             }
-            if !edge["confidence"].is_null()
-                && !matches!(
-                    edge["confidence"].as_str(),
-                    Some("syntactic" | "heuristic" | "indexed" | "imported" | "compiler")
-                )
+            basis = Some(current);
+            let center = text(b, "center_id")?;
+            let label = text(b, "coordinate")?;
+            if !id(center) || (page_index == 0 && !centers.insert(center.to_owned())) {
+                bail!("invalid or duplicate center");
+            }
+            if labels
+                .insert(center.into(), label.into())
+                .is_some_and(|old| old != label)
             {
-                bail!("invalid confidence");
+                bail!("center label conflict");
             }
-            if matches!(relation, "calls" | "method-call") && edge["confidence"] == "compiler" {
-                edges.insert((from.into(), to.into()));
+            if label == coordinate && page_index == 0 {
+                if root.replace(center.to_owned()).is_some() {
+                    bail!("duplicate selected root");
+                }
+            }
+            if let Some(records) = page["records"].as_array() {
+                rows.extend(records.iter().cloned().map(|row| {
+                    (
+                        row,
+                        page["related_project_scope"].clone(),
+                        page["related_project_attributions"].clone(),
+                        b["semantic_revision"].clone(),
+                    )
+                }));
+            }
+            for edge in page["edges"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("missing edges"))?
+            {
+                let from = text(edge, "from_id")?;
+                let to = text(edge, "to_id")?;
+                if !id(from) || !id(to) || (from != center && to != center) {
+                    bail!("invalid endpoint or non-incident edge");
+                }
+                for (key, label_key) in [(from, "from"), (to, "to")] {
+                    let label = text(edge, label_key)?;
+                    if labels
+                        .insert(key.into(), label.into())
+                        .is_some_and(|old| old != label)
+                    {
+                        bail!("conflicting endpoint labels");
+                    }
+                }
+                let relation = text(edge, "relation")?;
+                if !matches!(
+                    relation,
+                    "calls"
+                        | "method-call"
+                        | "type-reference"
+                        | "reads"
+                        | "writes"
+                        | "imports"
+                        | "implements"
+                        | "overrides"
+                        | "reexports"
+                        | "inherits"
+                        | "documents"
+                ) {
+                    bail!("invalid relation");
+                }
+                if edge.get("confidence").is_none() {
+                    bail!("missing confidence");
+                }
+                if !edge["confidence"].is_null()
+                    && !matches!(
+                        edge["confidence"].as_str(),
+                        Some("syntactic" | "heuristic" | "indexed" | "imported" | "compiler")
+                    )
+                {
+                    bail!("invalid confidence");
+                }
+                if matches!(relation, "calls" | "method-call") && edge["confidence"] == "compiler" {
+                    edges.insert((from.into(), to.into()));
+                }
             }
         }
     }
@@ -326,7 +328,7 @@ pub fn metrics(
         .count();
     let basis = basis.unwrap();
     Ok(Metrics {
-        basis: "observed subgraph of compiler call edges from single-page captures; global relation coverage unknown; SCC count and depth are not global lower bounds",
+        basis: "observed subgraph of compiler call edges from source-bound captures; global relation coverage unknown; SCC count and depth are not global lower bounds",
         view_root: source_view.into(),
         semantic_revision: basis[6].as_str().unwrap().into(),
         root_id: root,

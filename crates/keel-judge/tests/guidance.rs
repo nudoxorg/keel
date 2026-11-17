@@ -489,3 +489,186 @@ fn changed_endpoint_requires_explicit_matching_project_and_selected_id() {
         0
     );
 }
+
+#[test]
+fn receipt_bound_related_chain_checks_handoffs_and_source_basis() {
+    use sha2::{Digest, Sha256};
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/nudox-189f");
+    let tmp = tempfile::tempdir().unwrap();
+    for name in [
+        "manifest.json",
+        "inputs.json",
+        "before.json",
+        "graph.json",
+        "source.json",
+        "after.json",
+        "related.json",
+    ] {
+        std::fs::copy(fixture.join(name), tmp.path().join(name)).unwrap();
+    }
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let digest = |name: &str| hash(&std::fs::read(tmp.path().join(name)).unwrap());
+    let inputs_path = tmp.path().join("inputs.json");
+    let mut inputs: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+    inputs["observations"][0]["related"] = serde_json::json!([]);
+    inputs["observations"][0]["related_chains"] = serde_json::json!([{
+        "report":"report.json", "before_step":"before", "source_step":"source", "step":"pages", "after_step":"after",
+        "pages":[{"request":"request0.json","reply":"reply0.json"},{"request":"request1.json","reply":"reply1.json"}]
+    }]);
+    std::fs::write(&inputs_path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+    let original: Value =
+        serde_json::from_slice(&std::fs::read(tmp.path().join("related.json")).unwrap()).unwrap();
+    let coordinate = original["related_basis"]["coordinate"].clone();
+    let continuation = serde_json::json!({"name":"backend.related","arguments":{"coordinate":coordinate,"cursor":"opaque-cursor","limit":20}});
+    let req0 = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"backend.related","arguments":{"coordinate":coordinate,"limit":20}}});
+    let req1 =
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":continuation});
+    let mut first = original.clone();
+    let mut last = original.clone();
+    let edges = original["edges"].as_array().unwrap();
+    first["edges"] = serde_json::json!(edges[..4]);
+    last["edges"] = serde_json::json!(edges[4..]);
+    first["more"] = true.into();
+    first["nextCursor"] = "opaque-cursor".into();
+    first["continuation_call"] = continuation;
+    last["related_basis"]["neighborhood_root"] = "ab".repeat(32).into();
+    let requests = [req0, req1];
+    let replies = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":first}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"structuredContent":last}}),
+    ];
+    for i in 0..2 {
+        std::fs::write(
+            tmp.path().join(format!("request{i}.json")),
+            serde_json::to_vec(&requests[i]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(format!("reply{i}.json")),
+            serde_json::to_vec(&replies[i]).unwrap(),
+        )
+        .unwrap();
+    }
+    let report = serde_json::json!({"schema":1,"status":"pass","driver_sha256":"11".repeat(32),"manifest_sha256":digest("manifest.json"),"cases":[{"id":"fanout","status":"pass","steps":[
+        {"id":"before","status":"pass","detail":{"stdout_sha256":digest("before.json")}},
+        {"id":"source","status":"pass","detail":{"stdout_sha256":digest("source.json")}},
+        {"id":"pages","status":"pass","detail":{"page_receipts":[
+            {"pid":123,"request_id":1,"request_sha256":digest("request0.json"),"reply_sha256":digest("reply0.json")},
+            {"pid":123,"request_id":2,"request_sha256":digest("request1.json"),"reply_sha256":digest("reply1.json")}
+        ]}},
+        {"id":"after","status":"pass","detail":{"stdout_sha256":digest("after.json")}}
+    ]}]});
+    let report_path = tmp.path().join("report.json");
+    std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_keel-judge"))
+            .args(["guidance", "--manifest"])
+            .arg(tmp.path().join("manifest.json"))
+            .arg("--inputs")
+            .arg(&inputs_path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let good = run();
+    assert_eq!(
+        good["evidence"][0]["related_metrics"]["observed_call_edges"],
+        8
+    );
+    for field in ["pid", "request_id", "request_sha256", "reply_sha256"] {
+        let mut bad = report.clone();
+        bad["cases"][0]["steps"][2]["detail"]["page_receipts"][1][field] = Value::Null;
+        std::fs::write(&report_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(run()["evidence"][0]["related_metrics"].is_null(), "{field}");
+    }
+    let mut bad = report.clone();
+    bad["manifest_sha256"] = "00".repeat(32).into();
+    std::fs::write(&report_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    assert!(run()["evidence"][0]["related_metrics"].is_null());
+    std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+    let mut bad_request = requests[1].clone();
+    bad_request["params"]["arguments"]["cursor"] = "other".into();
+    std::fs::write(
+        tmp.path().join("request1.json"),
+        serde_json::to_vec(&bad_request).unwrap(),
+    )
+    .unwrap();
+    let mut bad = report.clone();
+    bad["cases"][0]["steps"][2]["detail"]["page_receipts"][1]["request_sha256"] =
+        digest("request1.json").into();
+    std::fs::write(&report_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    assert!(
+        run()["evidence"][0]["related_metrics"].is_null(),
+        "rehashed wrong continuation"
+    );
+    std::fs::write(
+        tmp.path().join("request1.json"),
+        serde_json::to_vec(&requests[1]).unwrap(),
+    )
+    .unwrap();
+    for variant in [
+        "stale_basis",
+        "repeat_edge",
+        "conflicting_row",
+        "not_terminal",
+        "withheld",
+    ] {
+        let mut bad_reply = replies[1].clone();
+        let page = &mut bad_reply["result"]["structuredContent"];
+        match variant {
+            "stale_basis" => page["related_basis"]["semantic_revision"] = "dd".repeat(32).into(),
+            "repeat_edge" => page["edges"]
+                .as_array_mut()
+                .unwrap()
+                .push(replies[0]["result"]["structuredContent"]["edges"][0].clone()),
+            "conflicting_row" => page["records"][0]["identity"]["coordinate"] = "different".into(),
+            "not_terminal" => page["more"] = true.into(),
+            "withheld" => page["related_evidence_withheld"] = true.into(),
+            _ => unreachable!(),
+        }
+        std::fs::write(
+            tmp.path().join("reply1.json"),
+            serde_json::to_vec(&bad_reply).unwrap(),
+        )
+        .unwrap();
+        let mut bad = report.clone();
+        bad["cases"][0]["steps"][2]["detail"]["page_receipts"][1]["reply_sha256"] =
+            digest("reply1.json").into();
+        std::fs::write(&report_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(
+            run()["evidence"][0]["related_metrics"].is_null(),
+            "{variant}"
+        );
+    }
+    let mut first_claim = replies[0].clone();
+    let mut last_claim = replies[1].clone();
+    first_claim["result"]["structuredContent"]["related_project_attributions"] =
+        serde_json::json!([{"row_id":"symbol:abc", "path":"a"}]);
+    last_claim["result"]["structuredContent"]["related_project_attributions"] =
+        serde_json::json!([{"row_id":"symbol:abc", "path":"b"}]);
+    std::fs::write(
+        tmp.path().join("reply0.json"),
+        serde_json::to_vec(&first_claim).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("reply1.json"),
+        serde_json::to_vec(&last_claim).unwrap(),
+    )
+    .unwrap();
+    let mut bad = report.clone();
+    bad["cases"][0]["steps"][2]["detail"]["page_receipts"][0]["reply_sha256"] =
+        digest("reply0.json").into();
+    bad["cases"][0]["steps"][2]["detail"]["page_receipts"][1]["reply_sha256"] =
+        digest("reply1.json").into();
+    std::fs::write(&report_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    assert!(
+        run()["evidence"][0]["related_metrics"].is_null(),
+        "conflicting claims"
+    );
+}

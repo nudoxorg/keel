@@ -34,6 +34,8 @@ struct Observation {
     after: String,
     #[serde(default)]
     related: Vec<String>,
+    #[serde(default)]
+    related_chains: Vec<crate::related_chain::Chain>,
 }
 #[derive(Serialize)]
 struct Evidence {
@@ -235,16 +237,38 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                         .into_iter()
                         .collect();
                 }
-                if !o.related.is_empty() {
+                if !o.related.is_empty() || !o.related_chains.is_empty() {
                     let mut pages = Vec::new();
                     for path in &o.related {
                         let (page, hash) = read_json(base, path)?;
-                        pages.push(page);
+                        pages.push(vec![page]);
                         e.captures_blake3.push(hash);
                     }
+                    let mut chain_error = None;
+                    for chain in &o.related_chains {
+                        match crate::related_chain::load(
+                            base,
+                            manifest_path,
+                            chain,
+                            &e.case,
+                            &o.before,
+                            &o.source,
+                            &o.after,
+                        ) {
+                            Ok((group, hashes)) => {
+                                pages.push(group);
+                                e.captures_blake3.extend(hashes);
+                            }
+                            Err(err) => {
+                                chain_error = Some(err);
+                                break;
+                            }
+                        }
+                    }
                     let seed = selected_id(&source["identity"]);
-                    let result = match seed {
-                        Some(seed) => crate::related::metrics(
+                    let result = match (chain_error, seed) {
+                        (Some(err), _) => Err(err),
+                        (None, Some(seed)) => crate::related::metrics(
                             &pages,
                             string(&before, "/revision").unwrap(),
                             string(&before, "/source").unwrap(),
@@ -254,7 +278,9 @@ pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {
                             string(&source, "/identity/path").unwrap(),
                             &changed,
                         ),
-                        None => Err(anyhow::anyhow!("source lacks an exact selected-symbol ID")),
+                        (None, None) => {
+                            Err(anyhow::anyhow!("source lacks an exact selected-symbol ID"))
+                        }
                     };
                     match result {
                         Ok(m) => {

@@ -74,3 +74,25 @@ The CLI tests include independently authored synthetic protocol controls and
 sanitized, status-bracketed responses from an official 189f backend fanout run.
 See the fixture README for provenance. The run does not establish complete
 relation coverage or predict scheduling performance.
+
+For a paginated capture, an observation may provide `related_chains` in addition
+to single-page `related` inputs. Each chain names a trusted driver report,
+passing case step IDs for the bracketing status responses, source response and
+page call, and an ordered array of raw JSON-RPC request and reply paths:
+
+```json
+{"report":"report.json","before_step":"status-before","source_step":"source",
+ "step":"related-pages","after_step":"status-after",
+ "pages":[{"request":"page-0.request.json","reply":"page-0.json"},
+          {"request":"page-1.request.json","reply":"page-1.json"}]}
+```
+
+The report must bind the exact manifest and raw status/source bytes, and its
+ordered page receipts must bind each raw request and reply by SHA-256, request ID
+and one process ID. The adapter checks each next request against the preceding
+continuation, requires a terminal page, preserves each neighborhood root, and
+rejects conflicting repeated rows or claims and repeated chain edges. Source,
+view, semantic and project scopes must stay stable. A forged or modified
+unsigned report can forge these links: the local driver receipt and owner
+transport are trust inputs, not signatures or offline proof of source membership.
+Incomplete or unverified chains remain unknown.
