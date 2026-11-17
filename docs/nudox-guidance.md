@@ -50,7 +50,8 @@ must be full, unwithheld single-page `backend.related` responses with the
 `related_basis` and endpoint IDs introduced by backend commit bfd1c27d94.
 All pages must share the full source basis and semantic revision, match the
 bracketing status view root and source object, and contain the requested case
-coordinate and exact selected source ID as a center. Paged results are unknown until continuation verification is supported.
+coordinate and exact selected source ID as a center. Paged results supplied
+through `related` remain unknown; use the receipt-bound chain form below.
 Malformed or mismatched related evidence makes that case unknown. Captures are
 hashed in the evidence list after the four original responses.
 
@@ -60,8 +61,10 @@ on that captured relation set. SCC count and maximum reverse shortest depth
 describe the **observed subgraph only**: adding edges can change either in both
 directions. The adapter orders cases with observed forward paths to changed
 declarations first. The source seed is attributed by its source response; other
-endpoints count as changed only when their own records explicitly carry the same
-project, selected ID, coordinate and changed path. Missing project attribution is
+endpoints count as changed only when their records match a same-page owner-issued
+attribution in project, selected ID, coordinate, path, view, semantic revision,
+and source/workspace scope. The adapter checks visible consistency only; it
+cannot verify the owner's seal or source membership offline. Missing project attribution is
 reported as `unattributed_related_nodes`, never inferred from opaque coordinate
 text. This is a scheduling hint; an absent path proves nothing,
 case-to-coordinate bindings remain caller supplied, and global complexity,
@@ -72,3 +75,31 @@ The CLI tests include independently authored synthetic protocol controls and
 sanitized, status-bracketed responses from an official 189f backend fanout run.
 See the fixture README for provenance. The run does not establish complete
 relation coverage or predict scheduling performance.
+
+For a paginated capture, an observation may provide `related_chains` in addition
+to single-page `related` inputs. Each chain names a trusted driver report,
+passing case step IDs for the bracketing status responses, source response and
+page call, and an ordered array of driver-persisted JSON-RPC request and reply paths:
+
+```json
+{"report":"report.json","before_step":"status-before","source_step":"source",
+ "step":"related-pages","after_step":"status-after",
+ "pages":[{"request":"page-0.request.json","reply":"page-0.json"},
+          {"request":"page-1.request.json","reply":"page-1.json"}]}
+```
+
+The report must bind the exact manifest and raw status/source bytes, and its
+ordered page receipts must bind each persisted request and reply by SHA-256, request ID
+and one process ID. The adapter checks each next request against the preceding
+continuation, requires a terminal page, preserves each neighborhood root, and
+rejects conflicting repeated rows or claims and repeated chain edges. Source,
+view, semantic and project scopes must stay stable. A forged or modified
+unsigned report can forge these links: the local driver receipt and owner
+transport are trust inputs, not signatures or offline proof of source membership.
+The driver serializes JSON after exact-key redaction; these files preserve the
+hashed driver captures, not necessarily the original transport bytes.
+Incomplete or unverified chains remain unknown.
+An observation cannot mix `related` and `related_chains`. Each capture is
+limited to 16 MiB, and the combined chain reads for one observation are limited
+to 64 MiB. Each nonterminal page and each continuation page must add a typed
+edge; an empty single-page terminal neighborhood is valid.
