@@ -779,11 +779,11 @@ fn private_account_key_reaches_only_cli_and_mcp_and_is_redacted() {
     fs::write(&keyfile, format!("{key}\n")).unwrap();
     fs::set_permissions(&keyfile, fs::Permissions::from_mode(0o600)).unwrap();
     let daemon = world.0.join("bins/backend-locald");
-    fs::write(&daemon, format!("#!/usr/bin/python3\nimport socket,sys,time,os\nassert 'NUDOX_API_KEY' not in os.environ\nsys.stderr.write('{key}\\n'); sys.stderr.flush()\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n")).unwrap();
+    fs::write(&daemon, format!("#!/usr/bin/env python3\nimport socket,sys,time,os\nassert 'NUDOX_API_KEY' not in os.environ\nsys.stderr.write('{key}\\n'); sys.stderr.flush()\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n")).unwrap();
     let cli = world.0.join("bins/backend-cli");
-    fs::write(&cli, "#!/usr/bin/python3\nimport os,sys,json,time\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k[:5]); sys.stderr.flush(); time.sleep(.05); sys.stderr.write(k[5:]); sys.stderr.flush(); print(k if sys.argv[sys.argv.index('--format')+1]=='markdown' else json.dumps({'key_echo':k}))\n").unwrap();
+    fs::write(&cli, "#!/usr/bin/env python3\nimport os,sys,json,time\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k[:5]); sys.stderr.flush(); time.sleep(.05); sys.stderr.write(k[5:]); sys.stderr.flush(); print(k if sys.argv[sys.argv.index('--format')+1]=='markdown' else json.dumps({'key_echo':k}))\n").unwrap();
     let mcp = world.0.join("bins/backend-mcp");
-    fs::write(&mcp, "#!/usr/bin/python3\nimport os,sys,json\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k+'\\n'); sys.stderr.flush()\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'protocolVersion':'2025-11-25'}}),flush=True)\n elif r.get('method')=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'isError':False,'structuredContent':{'key_echo':k},'content':[{'type':'text','text':k}]}}),flush=True)\n").unwrap();
+    fs::write(&mcp, "#!/usr/bin/env python3\nimport os,sys,json\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k+'\\n'); sys.stderr.flush()\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'protocolVersion':'2025-11-25'}}),flush=True)\n elif r.get('method')=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'isError':False,'structuredContent':{'key_echo':k},'content':[{'type':'text','text':k}]}}),flush=True)\n").unwrap();
     let worker = world.0.join("bins/worker");
     fs::write(
         &worker,
@@ -933,10 +933,10 @@ fn private_key_prefix_is_withheld_at_capture_limits_without_deadlock() {
         } else {
             String::new()
         };
-        fs::write(&daemon, format!("#!/usr/bin/python3\nimport socket,sys,time\nlimit=8*1024*1024\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\n{noise}while True: time.sleep(1)\n")).unwrap();
+        fs::write(&daemon, format!("#!/usr/bin/env python3\nimport socket,sys,time\nlimit=8*1024*1024\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\n{noise}while True: time.sleep(1)\n")).unwrap();
         let cli = world.0.join("bins/backend-cli");
         let target = if kind == "stderr" { "stderr" } else { "stdout" };
-        fs::write(&cli, format!("#!/usr/bin/python3\nimport os,sys\nk=os.environ['NUDOX_API_KEY'].encode()\nsys.{target}.buffer.write(b'x'*(8*1024*1024-8)+k); sys.{target}.buffer.flush()\n")).unwrap();
+        fs::write(&cli, format!("#!/usr/bin/env python3\nimport os,sys\nk=os.environ['NUDOX_API_KEY'].encode()\nsys.{target}.buffer.write(b'x'*(8*1024*1024-8)+k); sys.{target}.buffer.flush()\n")).unwrap();
         let mcp = world.0.join("bins/backend-mcp");
         let stderr_noise = if kind == "session-stderr" {
             "sys.stderr.buffer.write(b'x'*(limit-8)+k); sys.stderr.buffer.flush()"
@@ -948,7 +948,7 @@ fn private_key_prefix_is_withheld_at_capture_limits_without_deadlock() {
         } else {
             "pass"
         };
-        fs::write(&mcp, format!("#!/usr/bin/python3\nimport sys,os,json\nlimit=8*1024*1024\nk=os.environ['NUDOX_API_KEY'].encode()\ninit=b'{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}\\n'\n{stderr_noise}\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': sys.stdout.buffer.write(init); sys.stdout.buffer.flush()\n elif r.get('method')=='tools/call': {stdout_noise}\n")).unwrap();
+        fs::write(&mcp, format!("#!/usr/bin/env python3\nimport sys,os,json\nlimit=8*1024*1024\nk=os.environ['NUDOX_API_KEY'].encode()\ninit=b'{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}\\n'\n{stderr_noise}\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': sys.stdout.buffer.write(init); sys.stdout.buffer.flush()\n elif r.get('method')=='tools/call': {stdout_noise}\n")).unwrap();
         for binary in [&daemon, &cli, &mcp] {
             fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -1069,13 +1069,13 @@ fn related_pages_keep_repeated_context_but_reject_graph_and_basis_conflicts() {
             _ => {}
         }
         let daemon = world.0.join("bins/backend-locald");
-        fs::write(&daemon, "#!/usr/bin/python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
+        fs::write(&daemon, "#!/usr/bin/env python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
         let cli = world.0.join("bins/backend-cli");
         fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
         let peer = world.0.join("bins/backend-mcp");
         let page_file = world.0.join("pages.json");
         fs::write(&page_file, json!([p0, p1]).to_string()).unwrap();
-        fs::write(&peer, format!("#!/usr/bin/python3\nimport json,sys\npages=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{'protocolVersion':'2025-11-25'}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':pages[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",page_file.to_str().unwrap())).unwrap();
+        fs::write(&peer, format!("#!/usr/bin/env python3\nimport json,sys\npages=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{'protocolVersion':'2025-11-25'}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':pages[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",page_file.to_str().unwrap())).unwrap();
         for binary in [&daemon, &cli, &peer] {
             fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -1285,11 +1285,11 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         fs::write(&mcp_data, json!([first, second]).to_string()).unwrap();
         fs::write(&cli_data, json!([cli_first, cli_second]).to_string()).unwrap();
         let daemon = world.0.join("bins/backend-locald");
-        fs::write(&daemon,"#!/usr/bin/python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
+        fs::write(&daemon,"#!/usr/bin/env python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
         let cli = world.0.join("bins/backend-cli");
-        fs::write(&cli,format!("#!/usr/bin/python3\nimport json,sys\np=json.load(open({:?}))\ni=1 if '--cursor' in sys.argv else 0\nprint(json.dumps({{'declaration_source_range':p[i]}}))\n",cli_data.to_str().unwrap())).unwrap();
+        fs::write(&cli,format!("#!/usr/bin/env python3\nimport json,sys\np=json.load(open({:?}))\ni=1 if '--cursor' in sys.argv else 0\nprint(json.dumps({{'declaration_source_range':p[i]}}))\n",cli_data.to_str().unwrap())).unwrap();
         let mcp = world.0.join("bins/backend-mcp");
-        fs::write(&mcp,format!("#!/usr/bin/python3\nimport json,sys\np=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':p[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",mcp_data.to_str().unwrap())).unwrap();
+        fs::write(&mcp,format!("#!/usr/bin/env python3\nimport json,sys\np=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':p[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",mcp_data.to_str().unwrap())).unwrap();
         for bin in [&daemon, &cli, &mcp] {
             fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
         }
