@@ -40,6 +40,13 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
     fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
+fn write_capture_json(path: &Path, value: &Value, secret: Option<&str>) -> Result<(), String> {
+    let mut text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    if let Some(secret) = secret {
+        text = text.replace(secret, "***");
+    }
+    fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
 fn authority_environment() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     const AUTHORITY_ENV: &[&str] = &[
@@ -538,16 +545,25 @@ impl World {
                 next_id: 1,
             },
         );
+        let capture_secret = self.secret().map(str::to_owned);
         let process = &mut self
             .sessions
             .get_mut(&step.session)
             .ok_or("new MCP session missing")?
             .process;
         let request = json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"keel-session-contract","version":"1"}}});
-        write_json(&prefix.with_extension("initialize-request.json"), &request)?;
+        write_capture_json(
+            &prefix.with_extension("initialize-request.json"),
+            &request,
+            capture_secret.as_deref(),
+        )?;
         let reply =
             process.exchange(&request, deadline.saturating_duration_since(Instant::now()))?;
-        write_json(&prefix.with_extension("initialize-reply.json"), &reply)?;
+        write_capture_json(
+            &prefix.with_extension("initialize-reply.json"),
+            &reply,
+            capture_secret.as_deref(),
+        )?;
         if reply.get("result").is_none() || reply.get("error").is_some() {
             return Err(format!("MCP initialization refused: {reply}"));
         }
@@ -560,8 +576,7 @@ impl World {
             &notification,
             deadline.saturating_duration_since(Instant::now()),
         )?;
-        let result =
-            json!({"session":step.session,"pid":process.pid(),"isolation":process.isolation()});
+        let result = json!({"session":step.session,"pid":process.pid(),"isolation":process.isolation(),"request_sha256":file_hash(&prefix.with_extension("initialize-request.json"))?,"reply_sha256":file_hash(&prefix.with_extension("initialize-reply.json"))?});
         write_json(&prefix.with_extension("json"), &result)?;
         for (name, binding) in &step.bind {
             self.bindings.insert(name.clone(), binding.value(&result)?);
@@ -584,6 +599,7 @@ impl World {
         }) {
             return Err("MCP call must be the exact {name, arguments} object".into());
         }
+        let capture_secret = self.secret().map(str::to_owned);
         let session = self
             .sessions
             .get_mut(&step.session)
@@ -598,9 +614,17 @@ impl World {
         {
             return Err("MCP request exceeds the bounded session frame".into());
         }
-        write_json(&prefix.with_extension("request.json"), &request)?;
+        write_capture_json(
+            &prefix.with_extension("request.json"),
+            &request,
+            capture_secret.as_deref(),
+        )?;
         let reply = session.process.exchange(&request, timeout)?;
-        write_json(&prefix.with_extension("reply.json"), &reply)?;
+        write_capture_json(
+            &prefix.with_extension("reply.json"),
+            &reply,
+            capture_secret.as_deref(),
+        )?;
         let result = reply
             .get("result")
             .ok_or_else(|| format!("MCP JSON-RPC fault: {reply}"))?;
@@ -631,7 +655,7 @@ impl World {
                 .insert(name.clone(), binding.value(structured)?);
         }
         Ok(
-            json!({"session":step.session,"pid":session_pid(&self.sessions, &step.session)?,"request_id":id,"is_error":step.mcp_error}),
+            json!({"session":step.session,"pid":session_pid(&self.sessions, &step.session)?,"request_id":id,"is_error":step.mcp_error,"request_sha256":file_hash(&prefix.with_extension("request.json"))?,"reply_sha256":file_hash(&prefix.with_extension("reply.json"))?}),
         )
     }
     fn mcp_stop(&mut self, step: &Step, prefix: &Path, timeout: Duration) -> Result<Value, String> {
@@ -683,6 +707,9 @@ impl World {
         let mut identities = BTreeSet::new();
         let mut first = Value::Null;
         let mut pages = 0usize;
+        let mut receipts = Vec::new();
+        let mut related =
+            (step.tool == "backend.related").then(crate::related_pages::RelatedPages::default);
         let last = loop {
             if pages == step.maximum_pages {
                 return Err(format!(
@@ -693,11 +720,13 @@ impl World {
             if !visited.insert(call.to_string()) {
                 return Err("continuation repeated an earlier opaque call".into());
             }
-            let reply = session.exchange(
-                &json!({"jsonrpc":"2.0","id":pages+1,"method":"tools/call","params":call}),
-                remaining(),
-            )?;
-            write_json(&prefix.with_extension(format!("page-{pages}.json")), &reply)?;
+            let request = json!({"jsonrpc":"2.0","id":pages+1,"method":"tools/call","params":call});
+            let request_path = prefix.with_extension(format!("page-{pages}.request.json"));
+            let reply_path = prefix.with_extension(format!("page-{pages}.json"));
+            write_capture_json(&request_path, &request, self.secret())?;
+            let reply = session.exchange(&request, remaining())?;
+            write_capture_json(&reply_path, &reply, self.secret())?;
+            receipts.push(json!({"pid":session.pid(),"request_id":pages+1,"request_sha256":file_hash(&request_path)?,"reply_sha256":file_hash(&reply_path)?}));
             let result = reply
                 .get("result")
                 .ok_or_else(|| format!("paged JSON-RPC fault: {reply}"))?;
@@ -738,11 +767,15 @@ impl World {
                     return Err("reference total changed during continuation".into());
                 }
             }
-            for row in page_records {
-                if !identities.insert(row.to_string()) {
-                    return Err("continuation repeated an exact reference/record".into());
+            if let Some(related) = &mut related {
+                related.push(structured, pages)?;
+            } else {
+                for row in page_records {
+                    if !identities.insert(row.to_string()) {
+                        return Err("continuation repeated an exact reference/record".into());
+                    }
+                    records.push(row.clone());
                 }
-                records.push(row.clone());
             }
             if pages == 0 {
                 first = structured.clone();
@@ -759,7 +792,7 @@ impl World {
                     if next["name"] != step.tool {
                         return Err("continuation changed tool name".into());
                     }
-                    if page_records.is_empty() {
+                    if related.is_none() && page_records.is_empty() {
                         return Err("continuation made no row progress".into());
                     }
                     call = next.clone();
@@ -774,7 +807,11 @@ impl World {
                 step.minimum_pages
             ));
         }
-        let aggregate = json!({"pages":pages,"records":records,"first":first,"last":last});
+        let aggregate = if let Some(related) = related {
+            related.finish(pages, first, last)?
+        } else {
+            json!({"pages":pages,"records":records,"first":first,"last":last})
+        };
         write_json(&prefix.with_extension("aggregate.json"), &aggregate)?;
         self.check(
             step.expect
@@ -786,7 +823,7 @@ impl World {
             Some(&aggregate),
         )?;
         Ok(
-            json!({"pages":pages,"records":aggregate["records"].as_array().map_or(0,Vec::len),"isolation":isolation}),
+            json!({"pages":pages,"records":aggregate["records"].as_array().map_or(0,Vec::len),"isolation":isolation,"page_receipts":receipts}),
         )
     }
     fn step(&mut self, step: &Step, prefix: &Path) -> Result<Value, String> {
