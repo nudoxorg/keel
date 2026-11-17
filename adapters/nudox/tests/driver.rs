@@ -779,11 +779,11 @@ fn private_account_key_reaches_only_cli_and_mcp_and_is_redacted() {
     fs::write(&keyfile, format!("{key}\n")).unwrap();
     fs::set_permissions(&keyfile, fs::Permissions::from_mode(0o600)).unwrap();
     let daemon = world.0.join("bins/backend-locald");
-    fs::write(&daemon, format!("#!/usr/bin/python3\nimport socket,sys,time,os\nassert 'NUDOX_API_KEY' not in os.environ\nsys.stderr.write('{key}\\n'); sys.stderr.flush()\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n")).unwrap();
+    fs::write(&daemon, format!("#!/usr/bin/env python3\nimport socket,sys,time,os\nassert 'NUDOX_API_KEY' not in os.environ\nsys.stderr.write('{key}\\n'); sys.stderr.flush()\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n")).unwrap();
     let cli = world.0.join("bins/backend-cli");
-    fs::write(&cli, "#!/usr/bin/python3\nimport os,sys,json,time\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k[:5]); sys.stderr.flush(); time.sleep(.05); sys.stderr.write(k[5:]); sys.stderr.flush(); print(k if sys.argv[sys.argv.index('--format')+1]=='markdown' else json.dumps({'key_echo':k}))\n").unwrap();
+    fs::write(&cli, "#!/usr/bin/env python3\nimport os,sys,json,time\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k[:5]); sys.stderr.flush(); time.sleep(.05); sys.stderr.write(k[5:]); sys.stderr.flush(); print(k if sys.argv[sys.argv.index('--format')+1]=='markdown' else json.dumps({'key_echo':k}))\n").unwrap();
     let mcp = world.0.join("bins/backend-mcp");
-    fs::write(&mcp, "#!/usr/bin/python3\nimport os,sys,json\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k+'\\n'); sys.stderr.flush()\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'protocolVersion':'2025-11-25'}}),flush=True)\n elif r.get('method')=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'isError':False,'structuredContent':{'key_echo':k},'content':[{'type':'text','text':k}]}}),flush=True)\n").unwrap();
+    fs::write(&mcp, "#!/usr/bin/env python3\nimport os,sys,json\nk=os.environ['NUDOX_API_KEY']; sys.stderr.write(k+'\\n'); sys.stderr.flush()\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'protocolVersion':'2025-11-25'}}),flush=True)\n elif r.get('method')=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'isError':False,'structuredContent':{'key_echo':k},'content':[{'type':'text','text':k}]}}),flush=True)\n").unwrap();
     let worker = world.0.join("bins/worker");
     fs::write(
         &worker,
@@ -933,10 +933,10 @@ fn private_key_prefix_is_withheld_at_capture_limits_without_deadlock() {
         } else {
             String::new()
         };
-        fs::write(&daemon, format!("#!/usr/bin/python3\nimport socket,sys,time\nlimit=8*1024*1024\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\n{noise}while True: time.sleep(1)\n")).unwrap();
+        fs::write(&daemon, format!("#!/usr/bin/env python3\nimport socket,sys,time\nlimit=8*1024*1024\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\n{noise}while True: time.sleep(1)\n")).unwrap();
         let cli = world.0.join("bins/backend-cli");
         let target = if kind == "stderr" { "stderr" } else { "stdout" };
-        fs::write(&cli, format!("#!/usr/bin/python3\nimport os,sys\nk=os.environ['NUDOX_API_KEY'].encode()\nsys.{target}.buffer.write(b'x'*(8*1024*1024-8)+k); sys.{target}.buffer.flush()\n")).unwrap();
+        fs::write(&cli, format!("#!/usr/bin/env python3\nimport os,sys\nk=os.environ['NUDOX_API_KEY'].encode()\nsys.{target}.buffer.write(b'x'*(8*1024*1024-8)+k); sys.{target}.buffer.flush()\n")).unwrap();
         let mcp = world.0.join("bins/backend-mcp");
         let stderr_noise = if kind == "session-stderr" {
             "sys.stderr.buffer.write(b'x'*(limit-8)+k); sys.stderr.buffer.flush()"
@@ -948,7 +948,7 @@ fn private_key_prefix_is_withheld_at_capture_limits_without_deadlock() {
         } else {
             "pass"
         };
-        fs::write(&mcp, format!("#!/usr/bin/python3\nimport sys,os,json\nlimit=8*1024*1024\nk=os.environ['NUDOX_API_KEY'].encode()\ninit=b'{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}\\n'\n{stderr_noise}\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': sys.stdout.buffer.write(init); sys.stdout.buffer.flush()\n elif r.get('method')=='tools/call': {stdout_noise}\n")).unwrap();
+        fs::write(&mcp, format!("#!/usr/bin/env python3\nimport sys,os,json\nlimit=8*1024*1024\nk=os.environ['NUDOX_API_KEY'].encode()\ninit=b'{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}\\n'\n{stderr_noise}\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': sys.stdout.buffer.write(init); sys.stdout.buffer.flush()\n elif r.get('method')=='tools/call': {stdout_noise}\n")).unwrap();
         for binary in [&daemon, &cli, &mcp] {
             fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -1069,17 +1069,17 @@ fn related_pages_keep_repeated_context_but_reject_graph_and_basis_conflicts() {
             _ => {}
         }
         let daemon = world.0.join("bins/backend-locald");
-        fs::write(&daemon, "#!/usr/bin/python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
+        fs::write(&daemon, "#!/usr/bin/env python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
         let cli = world.0.join("bins/backend-cli");
         fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
         let peer = world.0.join("bins/backend-mcp");
         let page_file = world.0.join("pages.json");
         fs::write(&page_file, json!([p0, p1]).to_string()).unwrap();
-        fs::write(&peer, format!("#!/usr/bin/python3\nimport json,sys\npages=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{'protocolVersion':'2025-11-25'}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':pages[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",page_file.to_str().unwrap())).unwrap();
+        fs::write(&peer, format!("#!/usr/bin/env python3\nimport json,sys\npages=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{'protocolVersion':'2025-11-25'}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':pages[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",page_file.to_str().unwrap())).unwrap();
         for binary in [&daemon, &cli, &peer] {
             fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let case = json!({"id":"related","language":"rust","steps":[{"id":"pages","kind":"pages","tool":tool,"arguments":{},"minimum_pages":2,"expect":{"exit":0,"json":[{"pointer":"/records","select":"/identity/coordinate","set_equals":["center","a","b"]},{"pointer":"/edges/1/from","equals":"b"}]}}]});
+        let case = json!({"id":"related","language":"rust","steps":[{"id":"pages","kind":"pages","tool":tool,"arguments":{},"minimum_pages":2,"bind":{"center":"/records/0/identity/coordinate"},"expect":{"exit":0,"json":[{"pointer":"/records","select":"/identity/coordinate","set_equals":["center","a","b"]},{"pointer":"/edges/1/from","equals":"b"}]}},{"id":"binding","kind":"process","binary":"probe","args":["-c","printf %s \"$1\"","_","${center}"],"expect":{"exit":0,"stdout_contains":["center"]}}]});
         let output = world.invoke(&manifest(vec![case]), &[]);
         assert_eq!(
             output.status.code(),
@@ -1111,5 +1111,325 @@ fn related_pages_keep_repeated_context_but_reject_graph_and_basis_conflicts() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let identity = json!(vec![7; 32]);
+    let page = |text: &str, start, end, cursor: Option<&str>| {
+        let mut p = json!({"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","selected_symbol":"1111111111111111111111111111111111111111111111111111111111111111","coordinate":"target","freshness":"verified_at_read","source":{"text":text,"start":start,"end":end,"total":11,"scope":"native_primary_declaration","source_identity":identity,"owner_start":8192,"owner_end":8203,"source_policy":{"observed":start}}});
+        if let Some(cursor) = cursor {
+            p["nextCursor"] = json!(cursor);
+            p["continuation_call"] = json!({"name":"backend.source","arguments":{"coordinate":"target","selected_symbol":{"kind":"selected-symbol-id","value":"1111111111111111111111111111111111111111111111111111111111111111"},"detail":"standard","byte_range":true,"cursor":cursor}});
+        }
+        p
+    };
+    for mutation in [
+        "valid",
+        "canonical-addition",
+        "legacy-array-id",
+        "legacy-array-wrong",
+        "added-selected-mismatch",
+        "mcp-only",
+        "gap",
+        "overlap",
+        "utf8-byte-count",
+        "oversized",
+        "identity",
+        "bad-identity",
+        "total",
+        "scope",
+        "extent",
+        "zero-progress",
+        "missing-cursor",
+        "wrong-continuation",
+        "wrong-coordinate",
+        "wrong-selected",
+        "wrong-detail",
+        "wrong-opt-in",
+        "selected-drift",
+        "revision-drift",
+        "malformed-revision",
+        "invalid-request-id",
+        "wrong-request-kind",
+        "coordinate-drift",
+        "wrong-first-coordinate",
+        "request-selected-mismatch",
+        "revision-cross-transport",
+        "selected-cross-transport",
+        "mcp-freshness",
+        "cli-freshness",
+        "selector-drift-later",
+        "loop",
+        "cli-mismatch",
+        "cli-loop",
+    ] {
+        let world = Sandbox::new();
+        let mut first = page("é漢", 0, 5, Some("mcp-next"));
+        let mut second = page("🦀\r\n", 5, 11, None);
+        match mutation {
+            "gap" => second["source"]["start"] = json!(6),
+            "overlap" => second["source"]["start"] = json!(4),
+            "utf8-byte-count" => first["source"]["end"] = json!(2),
+            "oversized" => {
+                first["source"]["text"] = json!("x".repeat(4097));
+                first["source"]["end"] = json!(4097);
+                first["source"]["total"] = json!(4103);
+                first["source"]["owner_end"] = json!(12295);
+            }
+            "identity" => second["source"]["source_identity"] = json!(vec![8; 32]),
+            "bad-identity" => second["source"]["source_identity"] = json!([7, 8]),
+            "total" => {
+                second["source"]["total"] = json!(12);
+                second["source"]["owner_end"] = json!(8204);
+            }
+            "scope" => second["source"]["scope"] = json!("unknown"),
+            "extent" => second["source"]["owner_end"] = json!(8204),
+            "zero-progress" => {
+                second["source"]["text"] = json!("");
+                second["source"]["end"] = json!(5);
+            }
+            "missing-cursor" => {
+                first.as_object_mut().unwrap().remove("nextCursor");
+            }
+            "wrong-continuation" => {
+                first["continuation_call"]["arguments"]["cursor"] = json!("foreign")
+            }
+            "wrong-coordinate" => {
+                first["continuation_call"]["arguments"]["coordinate"] = json!("foreign")
+            }
+            "wrong-selected" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
+            "wrong-detail" => first["continuation_call"]["arguments"]["detail"] = json!("full"),
+            "wrong-opt-in" => first["continuation_call"]["arguments"]["byte_range"] = json!(false),
+            "added-selected-mismatch" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
+            "legacy-array-wrong" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
+            "selected-drift" => {
+                second["selected_symbol"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
+            "revision-drift" => {
+                second["revision"] =
+                    json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            }
+            "malformed-revision" => {
+                first["revision"] =
+                    json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            }
+            "coordinate-drift" => second["coordinate"] = json!("foreign"),
+            "wrong-first-coordinate" => {
+                first["coordinate"] = json!("foreign");
+                second["coordinate"] = json!("foreign");
+            }
+            "request-selected-mismatch" => {
+                first["selected_symbol"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222");
+                second["selected_symbol"] = first["selected_symbol"].clone();
+            }
+            "revision-cross-transport" => {
+                first["revision"] =
+                    json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                second["revision"] = first["revision"].clone();
+            }
+            "mcp-freshness" => first["freshness"] = json!("unverified"),
+            "selector-drift-later" => {
+                first["source"]["total"] = json!(16);
+                first["source"]["owner_end"] = json!(8208);
+                second["source"]["total"] = json!(16);
+                second["source"]["owner_end"] = json!(8208);
+                second["nextCursor"] = json!("mcp-final");
+                second["continuation_call"] = first["continuation_call"].clone();
+                second["continuation_call"]["arguments"]["cursor"] = json!("mcp-final");
+                second["continuation_call"]["arguments"]["detail"] = json!("full");
+            }
+            "loop" => {
+                first["source"]["total"] = json!(16);
+                first["source"]["owner_end"] = json!(8208);
+                second["source"]["total"] = json!(16);
+                second["source"]["owner_end"] = json!(8208);
+                second["nextCursor"] = json!("mcp-next");
+                second["continuation_call"] = first["continuation_call"].clone();
+            }
+            _ => {}
+        }
+        let mut cli_first = page("é漢", 0, 5, Some("cli-next"));
+        cli_first
+            .as_object_mut()
+            .unwrap()
+            .remove("continuation_call");
+        let mut cli_second = page("🦀\r\n", 5, 11, None);
+        cli_first.as_object_mut().unwrap().remove("freshness");
+        cli_first["verified_at_read"] = json!(true);
+        cli_second.as_object_mut().unwrap().remove("freshness");
+        cli_second["verified_at_read"] = json!(true);
+        if mutation == "cli-freshness" {
+            cli_second["verified_at_read"] = json!(false);
+        }
+        if mutation == "selected-cross-transport" {
+            cli_first["selected_symbol"] =
+                json!("2222222222222222222222222222222222222222222222222222222222222222");
+            cli_second["selected_symbol"] = cli_first["selected_symbol"].clone();
+        }
+        if mutation == "cli-mismatch" {
+            cli_second["source"]["text"] = json!("🦀xx");
+        }
+        if mutation == "cli-loop" {
+            cli_first["source"]["total"] = json!(16);
+            cli_first["source"]["owner_end"] = json!(8208);
+            cli_second["source"]["total"] = json!(16);
+            cli_second["source"]["owner_end"] = json!(8208);
+            cli_second["nextCursor"] = json!("cli-next");
+        }
+        let mcp_data = world.0.join("mcp-pages.json");
+        let cli_data = world.0.join("cli-pages.json");
+        fs::write(&mcp_data, json!([first, second]).to_string()).unwrap();
+        fs::write(&cli_data, json!([cli_first, cli_second]).to_string()).unwrap();
+        let daemon = world.0.join("bins/backend-locald");
+        fs::write(&daemon,"#!/usr/bin/env python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
+        let cli = world.0.join("bins/backend-cli");
+        fs::write(&cli,format!("#!/usr/bin/env python3\nimport json,sys\np=json.load(open({:?}))\ni=1 if '--cursor' in sys.argv else 0\nprint(json.dumps({{'declaration_source_range':p[i]}}))\n",cli_data.to_str().unwrap())).unwrap();
+        let mcp = world.0.join("bins/backend-mcp");
+        fs::write(&mcp,format!("#!/usr/bin/env python3\nimport json,sys\np=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':p[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",mcp_data.to_str().unwrap())).unwrap();
+        for bin in [&daemon, &cli, &mcp] {
+            fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut case = json!({"id":"source","language":"typescript","steps":[
+          {"id":"read","kind":"pages","page_format":"source-range","tool":"backend.source","arguments":{"coordinate":"target","selected_symbol":{"kind":"selected-symbol-id","value":"1111111111111111111111111111111111111111111111111111111111111111"},"detail":"standard","byte_range":true},"cli":["source","target","--byte-range"],"minimum_pages":2,"bind":{"joined":"/text"},"expect":{"exit":0,"json":[{"pointer":"/text","equals":"é漢🦀\r\n"},{"pointer":"/bytes","equals":11},{"pointer":"/scope","equals":"native_primary_declaration"},{"pointer":"/source_policies","equals":[{"observed":0},{"observed":5}]}]}},
+          {"id":"bound","kind":"process","binary":"probe","args":["-c","printf %s \"$1\"","_","${joined}"],"expect":{"exit":0,"stdout_contains":["é漢🦀\r\n"]}}
+        ]});
+        if mutation == "mcp-only" {
+            case["steps"][0].as_object_mut().unwrap().remove("cli");
+        }
+        if mutation == "added-selected-mismatch" {
+            case["steps"][0]["arguments"]
+                .as_object_mut()
+                .unwrap()
+                .remove("selected_symbol");
+        }
+        if mutation == "legacy-array-id" || mutation == "legacy-array-wrong" {
+            case["steps"][0]["arguments"]["selected_symbol"]["value"] = json!(vec![17; 32]);
+        }
+        if mutation == "invalid-request-id" {
+            case["steps"][0]["arguments"]["selected_symbol"]["value"] = json!([17, 17]);
+        }
+        if mutation == "wrong-request-kind" {
+            case["steps"][0]["arguments"]["selected_symbol"]["kind"] = json!("coordinate");
+        }
+        if mutation == "canonical-addition" || mutation == "selector-drift-later" {
+            case["steps"][0]["arguments"]
+                .as_object_mut()
+                .unwrap()
+                .remove("detail");
+        }
+        let output = world.invoke(&manifest(vec![case]), &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(
+                if mutation == "valid"
+                    || mutation == "canonical-addition"
+                    || mutation == "legacy-array-id"
+                    || mutation == "mcp-only"
+                {
+                    0
+                } else {
+                    1
+                }
+            ),
+            "{mutation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if mutation == "valid"
+            || mutation == "canonical-addition"
+            || mutation == "legacy-array-id"
+            || mutation == "mcp-only"
+        {
+            let report = world.report();
+            let detail = &report["cases"][0]["steps"][0]["detail"];
+            assert_eq!(detail["page_receipts"].as_array().unwrap().len(), 2);
+            let aggregate: Value = serde_json::from_slice(
+                &fs::read(world.0.join("evidence/source/000-read.aggregate.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                aggregate["revision"],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            );
+            assert_eq!(
+                aggregate["selected_symbol"],
+                "1111111111111111111111111111111111111111111111111111111111111111"
+            );
+            assert_eq!(aggregate["coordinate"], "target");
+            assert_eq!(
+                aggregate["cli_pages"],
+                json!(if mutation == "mcp-only" { 0 } else { 2 })
+            );
+            if mutation != "mcp-only" {
+                assert_eq!(aggregate["cli_first"]["source"]["start"], 0);
+                assert_eq!(aggregate["cli_last"]["source"]["end"], 11);
+            }
+            assert_eq!(
+                detail["cli_page_receipts"].as_array().unwrap().len(),
+                if mutation == "mcp-only" { 0 } else { 2 }
+            );
+            assert_eq!(
+                detail["page_receipts"][0]["pid"],
+                detail["page_receipts"][1]["pid"]
+            );
+            for i in 0..2 {
+                for (field, file) in [
+                    ("request_sha256", format!("000-read.page-{i}.request.json")),
+                    ("reply_sha256", format!("000-read.page-{i}.json")),
+                ] {
+                    let bytes = fs::read(world.0.join("evidence/source").join(file)).unwrap();
+                    assert_eq!(
+                        detail["page_receipts"][i][field],
+                        json!(format!("{:x}", Sha256::digest(bytes)))
+                    );
+                }
+                if mutation == "mcp-only" {
+                    continue;
+                }
+                for (field, file) in [
+                    (
+                        "request_sha256",
+                        format!("000-read.cli-page-{i}.request.json"),
+                    ),
+                    ("reply_sha256", format!("000-read.cli-page-{i}.stdout")),
+                ] {
+                    let bytes = fs::read(world.0.join("evidence/source").join(file)).unwrap();
+                    assert_eq!(
+                        detail["cli_page_receipts"][i][field],
+                        json!(format!("{:x}", Sha256::digest(bytes)))
+                    );
+                }
+            }
+        }
+    }
+    for step in [
+        json!({"id":"bad","kind":"restart","page_format":"source-range"}),
+        json!({"id":"bad","kind":"restart","page_format":null}),
+        json!({"id":"bad","kind":"pages","page_format":"source-range","tool":"backend.search","arguments":{"byte_range":true},"expect":{"exit":0,"stdout_contains":["x"]}}),
+        json!({"id":"bad","kind":"pages","page_format":"source-range","tool":"backend.source","arguments":{"byte_range":false},"expect":{"exit":0,"stdout_contains":["x"]}}),
+    ] {
+        let world = Sandbox::new();
+        let output = world.invoke(
+            &manifest(vec![
+                json!({"id":"invalid","language":"rust","steps":[step]}),
+            ]),
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!world.0.join("evidence").exists());
     }
 }

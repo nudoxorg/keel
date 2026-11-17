@@ -11,6 +11,8 @@ mod manifest;
 mod process;
 #[cfg(unix)]
 mod related_pages;
+#[cfg(unix)]
+mod source_pages;
 
 fn main() -> std::process::ExitCode {
     #[cfg(unix)]

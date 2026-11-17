@@ -822,8 +822,243 @@ impl World {
             &[],
             Some(&aggregate),
         )?;
+        for (name, binding) in &step.bind {
+            self.bindings
+                .insert(name.clone(), binding.value(&aggregate)?);
+        }
         Ok(
             json!({"pages":pages,"records":aggregate["records"].as_array().map_or(0,Vec::len),"isolation":isolation,"page_receipts":receipts}),
+        )
+    }
+    fn source_pages(
+        &mut self,
+        step: &Step,
+        prefix: &Path,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let deadline = Instant::now() + timeout;
+        let remaining = || deadline.saturating_duration_since(Instant::now());
+        let mut command = self.account_command("backend-mcp");
+        command
+            .arg("--endpoint")
+            .arg(&self.endpoint)
+            .arg("--project")
+            .arg(&self.project);
+        let mut session = process::Session::spawn(&mut command, prefix, self.secret())?;
+        let init = session.exchange(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"keel-source-contract","version":"1"}}}), remaining())?;
+        if init.get("result").is_none() {
+            return Err("source MCP initialization refused".into());
+        }
+        session.exchange(
+            &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            remaining(),
+        )?;
+        let mut call = json!({"name":step.tool,"arguments":self.expand_json(&step.arguments)?});
+        let original_arguments = call["arguments"].clone();
+        let expected_selected = crate::source_pages::requested_symbol(&original_arguments)?;
+        let expected_coordinate = match original_arguments.get("coordinate") {
+            None => None,
+            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => return Err("source requested coordinate malformed".into()),
+        };
+        let mut frozen_selector = None::<serde_json::Map<String, Value>>;
+        let mut visited = BTreeSet::new();
+        let mut aggregate = crate::source_pages::SourcePages::new(
+            expected_selected.clone(),
+            expected_coordinate.clone(),
+            false,
+        );
+        let mut receipts = Vec::new();
+        loop {
+            let n = receipts.len();
+            if n >= step.maximum_pages {
+                return Err("source continuation exceeded maximum pages".into());
+            }
+            if !visited.insert(call.to_string()) {
+                return Err("source continuation repeated an opaque call".into());
+            }
+            let request = json!({"jsonrpc":"2.0","id":n+1,"method":"tools/call","params":call});
+            let request_path = prefix.with_extension(format!("page-{n}.request.json"));
+            let reply_path = prefix.with_extension(format!("page-{n}.json"));
+            write_capture_json(&request_path, &request, self.secret())?;
+            let captured_request: Value = serde_json::from_slice(&read(&request_path)?)
+                .map_err(|e| format!("captured source request is invalid JSON: {e}"))?;
+            if captured_request != request {
+                return Err("captured source request differs after redaction".into());
+            }
+            let reply = session.exchange(&request, remaining())?;
+            write_capture_json(&reply_path, &reply, self.secret())?;
+            let reply: Value = serde_json::from_slice(&read(&reply_path)?)
+                .map_err(|e| format!("captured source reply is invalid JSON: {e}"))?;
+            receipts.push(json!({"pid":session.pid(),"request_id":n+1,"request_sha256":file_hash(&request_path)?,"reply_sha256":file_hash(&reply_path)?}));
+            let result = reply.get("result").ok_or("source JSON-RPC fault")?;
+            match result.get("isError") {
+                None | Some(Value::Bool(false)) => {}
+                Some(Value::Bool(true)) => return Err("source tool refused".into()),
+                Some(_) => return Err("source isError must be a boolean".into()),
+            }
+            let page = result
+                .get("structuredContent")
+                .ok_or("source structured content missing")?;
+            if page["answer"] == "fault" {
+                return Err("source returned a fault".into());
+            }
+            let cursor = aggregate.push(page)?;
+            match cursor {
+                Some(cursor) => {
+                    let next = page
+                        .get("continuation_call")
+                        .ok_or("source continuation missing")?;
+                    if next.as_object().is_none_or(|o| {
+                        o.len() != 2
+                            || o.get("name") != Some(&json!("backend.source"))
+                            || !o.get("arguments").is_some_and(Value::is_object)
+                    }) || next["arguments"]["cursor"].as_str() != Some(cursor.as_str())
+                    {
+                        return Err("source continuation does not match cursor".into());
+                    }
+                    let arguments = next["arguments"]
+                        .as_object()
+                        .ok_or("source continuation arguments missing")?;
+                    if arguments.get("byte_range") != Some(&Value::Bool(true))
+                        || ["coordinate", "detail"].iter().any(|field| {
+                            original_arguments
+                                .get(*field)
+                                .is_some_and(|original| arguments.get(*field) != Some(original))
+                        })
+                    {
+                        return Err("source continuation changed the requested selector".into());
+                    }
+                    let continuation_selected =
+                        crate::source_pages::requested_symbol(&next["arguments"])?;
+                    if expected_selected
+                        .as_ref()
+                        .is_some_and(|expected| continuation_selected.as_ref() != Some(expected))
+                    {
+                        return Err(
+                            "source continuation changed the requested selected symbol".into()
+                        );
+                    }
+                    if continuation_selected
+                        .as_deref()
+                        .is_some_and(|selected| page["selected_symbol"].as_str() != Some(selected))
+                    {
+                        return Err("source continuation selected symbol differs from page".into());
+                    }
+                    let mut selector = arguments.clone();
+                    selector.remove("cursor");
+                    if let Some(selected) = continuation_selected {
+                        selector.insert(
+                            "selected_symbol".into(),
+                            json!({"kind":"selected-symbol-id","value":selected}),
+                        );
+                    }
+                    if frozen_selector
+                        .as_ref()
+                        .is_some_and(|frozen| frozen != &selector)
+                    {
+                        return Err("source continuation changed its frozen selector".into());
+                    }
+                    frozen_selector.get_or_insert(selector);
+                    call = next.clone();
+                }
+                None => {
+                    if page.get("continuation_call").is_some_and(|v| !v.is_null()) {
+                        return Err("terminal source has continuation".into());
+                    }
+                    break;
+                }
+            }
+        }
+        let isolation = session.isolation().clone();
+        session.finish_with_timeout(remaining())?;
+        if receipts.len() < step.minimum_pages {
+            return Err("source requires more pages".into());
+        }
+        let mut value = aggregate.finish()?;
+        let mut cli_receipts = Vec::new();
+        if !step.cli.is_empty() {
+            let mut cli_pages =
+                crate::source_pages::SourcePages::new(expected_selected, expected_coordinate, true);
+            let mut cursor = None::<String>;
+            let mut seen = BTreeSet::new();
+            loop {
+                let n = cli_receipts.len();
+                if n >= step.maximum_pages {
+                    return Err("CLI source exceeded maximum pages".into());
+                }
+                let mut args = step.cli.clone();
+                if let Some(token) = &cursor {
+                    if !seen.insert(token.clone()) {
+                        return Err("CLI source cursor repeated".into());
+                    }
+                    args.push("--cursor".into());
+                    args.push(token.clone());
+                }
+                let cli_prefix = prefix.with_extension(format!("cli-page-{n}"));
+                let request_path = prefix.with_extension(format!("cli-page-{n}.request.json"));
+                let expanded = args
+                    .iter()
+                    .map(|s| self.expand(s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                write_capture_json(&request_path, &json!(expanded), self.secret())?;
+                let output = self.cli(&args, "json", remaining(), &cli_prefix)?;
+                if output.code != Some(0) {
+                    return Err("CLI source page refused".into());
+                }
+                let mut stdout_name = cli_prefix.as_os_str().to_os_string();
+                stdout_name.push(".stdout");
+                let captured = read(Path::new(&stdout_name))?;
+                if captured != output.stdout {
+                    return Err("CLI source capture differs from checked output".into());
+                }
+                let reply: Value = serde_json::from_slice(&captured)
+                    .map_err(|e| format!("CLI source page is not JSON: {e}"))?;
+                let page = reply
+                    .get("declaration_source_range")
+                    .ok_or("CLI source range missing")?;
+                cursor = cli_pages.push(page)?;
+                cli_receipts.push(json!({"request_sha256":file_hash(&request_path)?,"reply_sha256":file_hash(Path::new(&stdout_name))?}));
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            let cli_value = cli_pages.finish()?;
+            for field in [
+                "text",
+                "bytes",
+                "revision",
+                "selected_symbol",
+                "coordinate",
+                "scope",
+                "source_identity",
+                "total",
+                "owner_start",
+                "owner_end",
+            ] {
+                if cli_value[field] != value[field] {
+                    return Err(format!("CLI and MCP source {field} differs"));
+                }
+            }
+            value["cli_first"] = cli_value["first"].clone();
+            value["cli_last"] = cli_value["last"].clone();
+        }
+        value["cli_pages"] = json!(cli_receipts.len());
+        write_json(&prefix.with_extension("aggregate.json"), &value)?;
+        self.check(
+            step.expect
+                .as_ref()
+                .ok_or("source pages expectation missing")?,
+            Some(0),
+            &[],
+            &[],
+            Some(&value),
+        )?;
+        for (name, binding) in &step.bind {
+            self.bindings.insert(name.clone(), binding.value(&value)?);
+        }
+        Ok(
+            json!({"pages":receipts.len(),"cli_pages":cli_receipts.len(),"bytes":value["bytes"],"isolation":isolation,"page_receipts":receipts,"cli_page_receipts":cli_receipts}),
         )
     }
     fn step(&mut self, step: &Step, prefix: &Path) -> Result<Value, String> {
@@ -865,7 +1100,11 @@ impl World {
         let until = Instant::now() + timeout;
         let time_left = || until.saturating_duration_since(Instant::now());
         if step.kind == "pages" {
-            return self.pages(step, prefix);
+            return if step.page_format.as_deref() == Some("source-range") {
+                self.source_pages(step, prefix, timeout)
+            } else {
+                self.pages(step, prefix)
+            };
         }
         match step.kind.as_str() {
             "mcp-start" => return self.mcp_start(step, prefix, timeout),
