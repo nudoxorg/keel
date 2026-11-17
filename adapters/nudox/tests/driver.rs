@@ -679,6 +679,31 @@ done
         assert_eq!(case["steps"][2]["status"], "blocked");
     }
     let steps = report["cases"][0]["steps"].as_array().expect("steps");
+    use sha2::{Digest, Sha256};
+    for (step, base, request, reply) in [
+        (
+            0,
+            "000-open",
+            "initialize-request.json",
+            "initialize-reply.json",
+        ),
+        (1, "001-first", "request.json", "reply.json"),
+        (5, "005-refused", "request.json", "reply.json"),
+    ] {
+        for (field, suffix) in [("request_sha256", request), ("reply_sha256", reply)] {
+            let bytes = fs::read(
+                world
+                    .0
+                    .join("evidence/session-history")
+                    .join(format!("{base}.{suffix}")),
+            )
+            .unwrap();
+            assert_eq!(
+                steps[step]["detail"][field],
+                json!(format!("{:x}", Sha256::digest(bytes)))
+            );
+        }
+    }
     let first = steps[0]["detail"]["pid"].as_u64().expect("first pid");
     let second = steps[7]["detail"]["pid"].as_u64().expect("second pid");
     assert_eq!(steps[4]["detail"]["pid"], first);
@@ -990,5 +1015,101 @@ fn private_key_prefix_is_withheld_at_capture_limits_without_deadlock() {
             !bytes.windows(prefix.len()).any(|window| window == prefix),
             "{kind}: truncated key prefix leaked"
         );
+    }
+}
+
+#[test]
+fn related_pages_keep_repeated_context_but_reject_graph_and_basis_conflicts() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let id = |c: char| c.to_string().repeat(64);
+    let row = |c: char, coordinate: &str| json!({"identity":{"coordinate":coordinate,"semantic_data":{"kind":"selected-symbol-id","value":id(c)}}});
+    let center = row('1', "center");
+    let a = row('2', "a");
+    let b = row('3', "b");
+    let edge = |from: char, coord: &str| json!({"from_id":format!("symbol:{}",id(from)),"from":coord,"to_id":format!("symbol:{}",id('1')),"to":"center","relation":"calls","confidence":"compiler"});
+    let claim =
+        |c: char| json!({"row_id":format!("symbol:{}",id(c)),"path":"src/lib.rs","seal":id('a')});
+    let basis = json!({"schema":1,"source_view_root":id('4'),"source_object":id('5'),"branch":id('6'),"log":id('7'),"source_schema":3,"sequence":4,"semantic_revision":id('8'),"neighborhood_root":id('9'),"center_id":format!("symbol:{}",id('1')),"coordinate":"center","relation_coverage":"unknown"});
+    let first = json!({"answer":"records","records":[center,a],"edges":[edge('2',"a")],"related_basis":basis,"related_project_scope":{"workspace_root":id('a'),"source_relation_root":id('b')},"related_project_attributions":[claim('1'),claim('2')],"more":true,"nextCursor":"opaque","continuation_call":{"name":"backend.related","arguments":{"cursor":"opaque"}}});
+    let mut second = json!({"answer":"records","records":[row('1',"center"),b],"edges":[edge('3',"b")],"related_basis":first["related_basis"],"related_project_scope":first["related_project_scope"],"related_project_attributions":[claim('1'),claim('3')],"more":false});
+    second["related_basis"]["neighborhood_root"] = json!(id('a'));
+    for mutation in [
+        "valid",
+        "duplicate-edge",
+        "conflicting-row",
+        "conflicting-claim",
+        "basis-drift",
+        "scope-drift",
+        "more-without-continuation",
+        "edge-coordinate",
+        "no-edge-progress",
+        "ordinary-duplicate",
+    ] {
+        let world = Sandbox::new();
+        let mut p0 = first.clone();
+        let mut p1 = second.clone();
+        let tool = if mutation == "ordinary-duplicate" {
+            "backend.search"
+        } else {
+            "backend.related"
+        };
+        match mutation {
+            "duplicate-edge" => p1["edges"] = json!([edge('2', "a")]),
+            "conflicting-row" => p1["records"][0]["identity"]["coordinate"] = json!("impostor"),
+            "conflicting-claim" => p1["related_project_attributions"][0]["seal"] = json!(id('b')),
+            "basis-drift" => p1["related_basis"]["sequence"] = json!(5),
+            "scope-drift" => p1["related_project_scope"]["workspace_root"] = json!(id('c')),
+            "more-without-continuation" => {
+                p0.as_object_mut().unwrap().remove("continuation_call");
+            }
+            "edge-coordinate" => p1["edges"][0]["from"] = json!("foreign"),
+            "no-edge-progress" => p1["edges"] = json!([]),
+            "ordinary-duplicate" => p0["continuation_call"]["name"] = json!(tool),
+            _ => {}
+        }
+        let daemon = world.0.join("bins/backend-locald");
+        fs::write(&daemon, "#!/usr/bin/python3\nimport socket,sys,time\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--endpoint')+1]); s.listen()\nwhile True: time.sleep(1)\n").unwrap();
+        let cli = world.0.join("bins/backend-cli");
+        fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+        let peer = world.0.join("bins/backend-mcp");
+        let page_file = world.0.join("pages.json");
+        fs::write(&page_file, json!([p0, p1]).to_string()).unwrap();
+        fs::write(&peer, format!("#!/usr/bin/python3\nimport json,sys\npages=json.load(open({:?}))\nfor line in sys.stdin:\n r=json.loads(line)\n if r.get('method')=='initialize': out={{'protocolVersion':'2025-11-25'}}\n elif r.get('method')=='tools/call': out={{'isError':False,'structuredContent':pages[r['id']-1]}}\n else: continue\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':out}}),flush=True)\n",page_file.to_str().unwrap())).unwrap();
+        for binary in [&daemon, &cli, &peer] {
+            fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let case = json!({"id":"related","language":"rust","steps":[{"id":"pages","kind":"pages","tool":tool,"arguments":{},"minimum_pages":2,"expect":{"exit":0,"json":[{"pointer":"/records","select":"/identity/coordinate","set_equals":["center","a","b"]},{"pointer":"/edges/1/from","equals":"b"}]}}]});
+        let output = world.invoke(&manifest(vec![case]), &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(if mutation == "valid" { 0 } else { 1 }),
+            "{mutation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if mutation == "valid" {
+            let report = world.report();
+            let receipts = report["cases"][0]["steps"][0]["detail"]["page_receipts"]
+                .as_array()
+                .unwrap();
+            assert_eq!(receipts.len(), 2);
+            assert_eq!(receipts[0]["pid"], receipts[1]["pid"]);
+            for (i, receipt) in receipts.iter().enumerate() {
+                assert_eq!(receipt["request_id"], json!(i + 1));
+                for (kind, suffix) in [
+                    ("request_sha256", format!("page-{i}.request.json")),
+                    ("reply_sha256", format!("page-{i}.json")),
+                ] {
+                    let bytes = fs::read(
+                        world
+                            .0
+                            .join("evidence/related")
+                            .join(format!("000-pages.{suffix}")),
+                    )
+                    .unwrap();
+                    assert_eq!(receipt[kind], json!(format!("{:x}", Sha256::digest(bytes))));
+                }
+            }
+        }
     }
 }
