@@ -1132,6 +1132,7 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         "canonical-addition",
         "legacy-array-id",
         "legacy-array-wrong",
+        "added-selected-mismatch",
         "mcp-only",
         "gap",
         "overlap",
@@ -1206,6 +1207,10 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             }
             "wrong-detail" => first["continuation_call"]["arguments"]["detail"] = json!("full"),
             "wrong-opt-in" => first["continuation_call"]["arguments"]["byte_range"] = json!(false),
+            "added-selected-mismatch" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
             "legacy-array-wrong" => {
                 first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
                     json!("2222222222222222222222222222222222222222222222222222222222222222")
@@ -1305,6 +1310,12 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         ]});
         if mutation == "mcp-only" {
             case["steps"][0].as_object_mut().unwrap().remove("cli");
+        }
+        if mutation == "added-selected-mismatch" {
+            case["steps"][0]["arguments"]
+                .as_object_mut()
+                .unwrap()
+                .remove("selected_symbol");
         }
         if mutation == "legacy-array-id" || mutation == "legacy-array-wrong" {
             case["steps"][0]["arguments"]["selected_symbol"]["value"] = json!(vec![17; 32]);

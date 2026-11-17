@@ -939,6 +939,12 @@ impl World {
                             "source continuation changed the requested selected symbol".into()
                         );
                     }
+                    if continuation_selected
+                        .as_deref()
+                        .is_some_and(|selected| page["selected_symbol"].as_str() != Some(selected))
+                    {
+                        return Err("source continuation selected symbol differs from page".into());
+                    }
                     let mut selector = arguments.clone();
                     selector.remove("cursor");
                     if let Some(selected) = continuation_selected {
