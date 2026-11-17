@@ -75,6 +75,14 @@ pub(crate) fn normal_path(path: &str) -> bool {
             .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
+pub(crate) fn valid_selected_id(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && text.bytes().any(|b| b != b'0')
+}
+
 /// Selected ID is a 64-hex string in the current wire format; older captures
 /// carry 32 integer bytes. A name or opaque coordinate is not an identity.
 pub(crate) fn selected_id(identity: &Value) -> Option<String> {
@@ -84,8 +92,7 @@ pub(crate) fn selected_id(identity: &Value) -> Option<String> {
     }
     let value = selected.get("value")?;
     if let Some(text) = value.as_str() {
-        return (text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| text.to_ascii_lowercase());
+        return valid_selected_id(text).then(|| text.to_owned());
     }
     let bytes = value.as_array()?;
     if bytes.len() != 32 {
@@ -96,7 +103,7 @@ pub(crate) fn selected_id(identity: &Value) -> Option<String> {
     for value in bytes {
         write!(&mut result, "{:02x}", u8::try_from(value.as_u64()?).ok()?).ok()?;
     }
-    Some(result)
+    valid_selected_id(&result).then_some(result)
 }
 
 pub fn order(manifest_path: &Path, inputs_path: &Path) -> Result<Order> {

@@ -28,7 +28,7 @@ fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 }
 fn id(s: &str) -> bool {
     s.strip_prefix("symbol:")
-        .is_some_and(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
+        .is_some_and(crate::guidance::valid_selected_id)
 }
 fn hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit())
