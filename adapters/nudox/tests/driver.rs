@@ -1120,7 +1120,7 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
     use std::os::unix::fs::PermissionsExt;
     let identity = json!(vec![7; 32]);
     let page = |text: &str, start, end, cursor: Option<&str>| {
-        let mut p = json!({"source":{"text":text,"start":start,"end":end,"total":11,"scope":"native_primary_declaration","source_identity":identity,"owner_start":8192,"owner_end":8203,"source_policy":{"observed":start}}});
+        let mut p = json!({"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","selected_symbol":"1111111111111111111111111111111111111111111111111111111111111111","coordinate":"target","freshness":"verified_at_read","source":{"text":text,"start":start,"end":end,"total":11,"scope":"native_primary_declaration","source_identity":identity,"owner_start":8192,"owner_end":8203,"source_policy":{"observed":start}}});
         if let Some(cursor) = cursor {
             p["nextCursor"] = json!(cursor);
             p["continuation_call"] = json!({"name":"backend.source","arguments":{"coordinate":"target","selected_symbol":{"kind":"selected-symbol-id","value":"1111111111111111111111111111111111111111111111111111111111111111"},"detail":"standard","byte_range":true,"cursor":cursor}});
@@ -1130,6 +1130,7 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
     for mutation in [
         "valid",
         "canonical-addition",
+        "legacy-array-id",
         "mcp-only",
         "gap",
         "overlap",
@@ -1147,6 +1148,17 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         "wrong-selected",
         "wrong-detail",
         "wrong-opt-in",
+        "selected-drift",
+        "revision-drift",
+        "malformed-revision",
+        "invalid-request-id",
+        "wrong-request-kind",
+        "coordinate-drift",
+        "request-selected-mismatch",
+        "revision-cross-transport",
+        "selected-cross-transport",
+        "mcp-freshness",
+        "cli-freshness",
         "selector-drift-later",
         "loop",
         "cli-mismatch",
@@ -1192,6 +1204,34 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             }
             "wrong-detail" => first["continuation_call"]["arguments"]["detail"] = json!("full"),
             "wrong-opt-in" => first["continuation_call"]["arguments"]["byte_range"] = json!(false),
+            "selected-drift" => {
+                second["selected_symbol"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
+            "revision-drift" => {
+                second["revision"] =
+                    json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            }
+            "malformed-revision" => {
+                first["revision"] =
+                    json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            }
+            "coordinate-drift" => second["coordinate"] = json!("foreign"),
+            "request-selected-mismatch" => {
+                first["selected_symbol"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222");
+                second["selected_symbol"] = first["selected_symbol"].clone();
+            }
+            "revision-cross-transport" => {
+                first["revision"] =
+                    json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                second["revision"] = first["revision"].clone();
+            }
+            "mcp-freshness" => first["freshness"] = json!("unverified"),
+            "legacy-array-id" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!(vec![17; 32])
+            }
             "selector-drift-later" => {
                 first["source"]["total"] = json!(16);
                 first["source"]["owner_end"] = json!(8208);
@@ -1218,6 +1258,18 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             .unwrap()
             .remove("continuation_call");
         let mut cli_second = page("🦀\r\n", 5, 11, None);
+        cli_first.as_object_mut().unwrap().remove("freshness");
+        cli_first["verified_at_read"] = json!(true);
+        cli_second.as_object_mut().unwrap().remove("freshness");
+        cli_second["verified_at_read"] = json!(true);
+        if mutation == "cli-freshness" {
+            cli_second["verified_at_read"] = json!(false);
+        }
+        if mutation == "selected-cross-transport" {
+            cli_first["selected_symbol"] =
+                json!("2222222222222222222222222222222222222222222222222222222222222222");
+            cli_second["selected_symbol"] = cli_first["selected_symbol"].clone();
+        }
         if mutation == "cli-mismatch" {
             cli_second["source"]["text"] = json!("🦀xx");
         }
@@ -1248,6 +1300,15 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         if mutation == "mcp-only" {
             case["steps"][0].as_object_mut().unwrap().remove("cli");
         }
+        if mutation == "legacy-array-id" {
+            case["steps"][0]["arguments"]["selected_symbol"]["value"] = json!(vec![17; 32]);
+        }
+        if mutation == "invalid-request-id" {
+            case["steps"][0]["arguments"]["selected_symbol"]["value"] = json!([17, 17]);
+        }
+        if mutation == "wrong-request-kind" {
+            case["steps"][0]["arguments"]["selected_symbol"]["kind"] = json!("coordinate");
+        }
         if mutation == "canonical-addition" || mutation == "selector-drift-later" {
             case["steps"][0]["arguments"]
                 .as_object_mut()
@@ -1258,7 +1319,10 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         assert_eq!(
             output.status.code(),
             Some(
-                if mutation == "valid" || mutation == "canonical-addition" || mutation == "mcp-only"
+                if mutation == "valid"
+                    || mutation == "canonical-addition"
+                    || mutation == "legacy-array-id"
+                    || mutation == "mcp-only"
                 {
                     0
                 } else {
@@ -1268,7 +1332,11 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             "{mutation}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        if mutation == "valid" || mutation == "canonical-addition" || mutation == "mcp-only" {
+        if mutation == "valid"
+            || mutation == "canonical-addition"
+            || mutation == "legacy-array-id"
+            || mutation == "mcp-only"
+        {
             let report = world.report();
             let detail = &report["cases"][0]["steps"][0]["detail"];
             assert_eq!(detail["page_receipts"].as_array().unwrap().len(), 2);
@@ -1276,6 +1344,15 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
                 &fs::read(world.0.join("evidence/source/000-read.aggregate.json")).unwrap(),
             )
             .unwrap();
+            assert_eq!(
+                aggregate["revision"],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            );
+            assert_eq!(
+                aggregate["selected_symbol"],
+                "1111111111111111111111111111111111111111111111111111111111111111"
+            );
+            assert_eq!(aggregate["coordinate"], "target");
             assert_eq!(
                 aggregate["cli_pages"],
                 json!(if mutation == "mcp-only" { 0 } else { 2 })

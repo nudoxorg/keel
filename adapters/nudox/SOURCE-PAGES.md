@@ -22,3 +22,11 @@ and byte-range opt-in. The first continuation may add canonical defaults; all
 non-cursor arguments are then fixed for subsequent continuations. The aggregate
 reports `cli_pages` separately and retains the first and last CLI pages when CLI
 pagination was requested; MCP and CLI are free to use different page boundaries.
+
+Each page also retains a canonical outer revision and selected-symbol identity,
+optional coordinate, and the transport's verified-at-read marker. These values
+must stay stable through a sequence, and CLI and MCP identities must agree. If
+an initial selected-symbol ID was supplied, its exact canonical bytes must
+match the returned identity; a legacy 32-byte array is accepted without
+substituting a coordinate-derived ID. These are consistency checks on the
+owner response, not independent authentication of the owner.

@@ -855,9 +855,10 @@ impl World {
         )?;
         let mut call = json!({"name":step.tool,"arguments":self.expand_json(&step.arguments)?});
         let original_arguments = call["arguments"].clone();
+        let expected_selected = crate::source_pages::requested_symbol(&original_arguments)?;
         let mut frozen_selector = None::<serde_json::Map<String, Value>>;
         let mut visited = BTreeSet::new();
-        let mut aggregate = crate::source_pages::SourcePages::default();
+        let mut aggregate = crate::source_pages::SourcePages::new(expected_selected.clone(), false);
         let mut receipts = Vec::new();
         loop {
             let n = receipts.len();
@@ -941,7 +942,7 @@ impl World {
         let mut value = aggregate.finish()?;
         let mut cli_receipts = Vec::new();
         if !step.cli.is_empty() {
-            let mut cli_pages = crate::source_pages::SourcePages::default();
+            let mut cli_pages = crate::source_pages::SourcePages::new(expected_selected, true);
             let mut cursor = None::<String>;
             let mut seen = BTreeSet::new();
             loop {
@@ -985,6 +986,9 @@ impl World {
             for field in [
                 "text",
                 "bytes",
+                "revision",
+                "selected_symbol",
+                "coordinate",
                 "scope",
                 "source_identity",
                 "total",
