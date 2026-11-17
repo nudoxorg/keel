@@ -15,3 +15,7 @@ the exact key before capture or parsing, including across read chunks. The
 redaction is not a general secret scanner: encoded, transformed, or partial
 copies are outside its scope. Product responses containing the exact key are
 changed before assertions and may therefore fail their contracts.
+
+If the harness reaches a capture size limit, it also withholds any trailing
+bytes that could be the beginning of the key, so truncation itself does not
+persist a credential prefix. Oversized output still fails the step.

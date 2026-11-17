@@ -43,7 +43,7 @@ struct Capture {
     error: Option<String>,
 }
 
-fn redact(bytes: &[u8], secret: Option<&str>) -> Vec<u8> {
+fn redact(bytes: &[u8], secret: Option<&str>, truncated: bool) -> Vec<u8> {
     let Some(secret) = secret else {
         return bytes.to_vec();
     };
@@ -59,6 +59,14 @@ fn redact(bytes: &[u8], secret: Option<&str>) -> Vec<u8> {
             offset += 1;
         }
     }
+    // Do not persist a credential prefix cut off by our own capture limit.
+    // Full matches have already been replaced with a marker outside the key alphabet.
+    if truncated {
+        let max = output.len().min(key.len().saturating_sub(1));
+        if let Some(n) = (1..=max).rev().find(|&n| output.ends_with(&key[..n])) {
+            output.truncate(output.len() - n);
+        }
+    }
     output
 }
 
@@ -72,6 +80,7 @@ fn drain<R: Read + Send + 'static>(
         let mut bytes = Vec::new();
         let mut buf = [0_u8; 16 * 1024];
         let mut error = None;
+        let mut truncated = false;
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) => break,
@@ -81,6 +90,7 @@ fn drain<R: Read + Send + 'static>(
                         bytes.extend_from_slice(&buf[..keep]);
                     }
                     if keep < n {
+                        truncated = true;
                         error
                             .get_or_insert_with(|| format!("output exceeded {STREAM_LIMIT} bytes"));
                     }
@@ -92,7 +102,7 @@ fn drain<R: Read + Send + 'static>(
                 }
             }
         }
-        let bytes = redact(&bytes, secret.as_deref());
+        let bytes = redact(&bytes, secret.as_deref(), truncated);
         if let Err(e) = file.write_all(&bytes) {
             error.get_or_insert_with(|| format!("write capture: {e}"));
         }
@@ -408,7 +418,7 @@ impl Session {
                     break;
                 }
                 let kept = n.min(remaining);
-                let safe_line = redact(&line[..kept], stdout_secret.as_deref());
+                let safe_line = redact(&line[..kept], stdout_secret.as_deref(), n > remaining);
                 if let Err(e) = stdout_file.write_all(&safe_line) {
                     let _ = response_tx.send(Err(format!("write session stdout: {e}")));
                     break;
