@@ -101,4 +101,5 @@ hashed driver captures, not necessarily the original transport bytes.
 Incomplete or unverified chains remain unknown.
 An observation cannot mix `related` and `related_chains`. Each capture is
 limited to 16 MiB, and the combined chain reads for one observation are limited
-to 64 MiB. Each nonterminal page must add a typed edge.
+to 64 MiB. Each nonterminal page and each continuation page must add a typed
+edge; an empty single-page terminal neighborhood is valid.

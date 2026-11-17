@@ -696,6 +696,7 @@ fn receipt_bound_related_chain_checks_handoffs_and_source_basis() {
         "conflicting_row",
         "not_terminal",
         "withheld",
+        "empty_terminal",
     ] {
         let mut bad_reply = replies[1].clone();
         let page = &mut bad_reply["result"]["structuredContent"];
@@ -708,6 +709,7 @@ fn receipt_bound_related_chain_checks_handoffs_and_source_basis() {
             "conflicting_row" => page["records"][0]["identity"]["coordinate"] = "different".into(),
             "not_terminal" => page["more"] = true.into(),
             "withheld" => page["related_evidence_withheld"] = true.into(),
+            "empty_terminal" => page["edges"] = serde_json::json!([]),
             _ => unreachable!(),
         }
         std::fs::write(

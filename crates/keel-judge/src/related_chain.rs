@@ -265,6 +265,9 @@ pub(crate) fn load(
                 bail!("repeated chain edge");
             }
         }
+        if (i > 0 || i + 1 < c.pages.len()) && edges.len() == prior_edges {
+            bail!("continuation page made no edge progress");
+        }
         if i + 1 == c.pages.len() {
             if p["more"] != false
                 || p.get("continuation_call").is_some()
@@ -274,9 +277,6 @@ pub(crate) fn load(
             }
             next = None;
         } else {
-            if edges.len() == prior_edges {
-                bail!("nonterminal page made no edge progress");
-            }
             if p["more"] != true || !p["continuation_call"].is_object() {
                 bail!("missing continuation");
             }
