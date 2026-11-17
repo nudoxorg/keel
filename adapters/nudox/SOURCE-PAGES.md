@@ -16,3 +16,9 @@ compared between transports. Both transports preserve page evidence and file
 hash receipts. `bind` reads from the completed aggregate for both source and
 ordinary `pages` steps. The hashes identify locally retained, redacted bytes;
 they are not an independent owner seal verification.
+
+A continuation must retain the requested coordinate, selected symbol, detail,
+and byte-range opt-in. The first continuation may add canonical defaults; all
+non-cursor arguments are then fixed for subsequent continuations. The aggregate
+reports `cli_pages` separately and retains the first and last CLI pages when CLI
+pagination was requested; MCP and CLI are free to use different page boundaries.

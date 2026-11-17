@@ -854,6 +854,8 @@ impl World {
             remaining(),
         )?;
         let mut call = json!({"name":step.tool,"arguments":self.expand_json(&step.arguments)?});
+        let original_arguments = call["arguments"].clone();
+        let mut frozen_selector = None::<serde_json::Map<String, Value>>;
         let mut visited = BTreeSet::new();
         let mut aggregate = crate::source_pages::SourcePages::default();
         let mut receipts = Vec::new();
@@ -898,6 +900,29 @@ impl World {
                     {
                         return Err("source continuation does not match cursor".into());
                     }
+                    let arguments = next["arguments"]
+                        .as_object()
+                        .ok_or("source continuation arguments missing")?;
+                    if arguments.get("byte_range") != Some(&Value::Bool(true))
+                        || ["coordinate", "selected_symbol", "detail"]
+                            .iter()
+                            .any(|field| {
+                                original_arguments
+                                    .get(*field)
+                                    .is_some_and(|original| arguments.get(*field) != Some(original))
+                            })
+                    {
+                        return Err("source continuation changed the requested selector".into());
+                    }
+                    let mut selector = arguments.clone();
+                    selector.remove("cursor");
+                    if frozen_selector
+                        .as_ref()
+                        .is_some_and(|frozen| frozen != &selector)
+                    {
+                        return Err("source continuation changed its frozen selector".into());
+                    }
+                    frozen_selector.get_or_insert(selector);
                     call = next.clone();
                 }
                 None => {
@@ -913,7 +938,7 @@ impl World {
         if receipts.len() < step.minimum_pages {
             return Err("source requires more pages".into());
         }
-        let value = aggregate.finish()?;
+        let mut value = aggregate.finish()?;
         let mut cli_receipts = Vec::new();
         if !step.cli.is_empty() {
             let mut cli_pages = crate::source_pages::SourcePages::default();
@@ -970,7 +995,10 @@ impl World {
                     return Err(format!("CLI and MCP source {field} differs"));
                 }
             }
+            value["cli_first"] = cli_value["first"].clone();
+            value["cli_last"] = cli_value["last"].clone();
         }
+        value["cli_pages"] = json!(cli_receipts.len());
         write_json(&prefix.with_extension("aggregate.json"), &value)?;
         self.check(
             step.expect
@@ -985,7 +1013,7 @@ impl World {
             self.bindings.insert(name.clone(), binding.value(&value)?);
         }
         Ok(
-            json!({"pages":receipts.len(),"bytes":value["bytes"],"isolation":isolation,"page_receipts":receipts,"cli_page_receipts":cli_receipts}),
+            json!({"pages":receipts.len(),"cli_pages":cli_receipts.len(),"bytes":value["bytes"],"isolation":isolation,"page_receipts":receipts,"cli_page_receipts":cli_receipts}),
         )
     }
     fn step(&mut self, step: &Step, prefix: &Path) -> Result<Value, String> {

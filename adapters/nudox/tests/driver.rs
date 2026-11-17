@@ -1123,12 +1123,13 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         let mut p = json!({"source":{"text":text,"start":start,"end":end,"total":11,"scope":"native_primary_declaration","source_identity":identity,"owner_start":8192,"owner_end":8203,"source_policy":{"observed":start}}});
         if let Some(cursor) = cursor {
             p["nextCursor"] = json!(cursor);
-            p["continuation_call"] = json!({"name":"backend.source","arguments":{"coordinate":"target","byte_range":true,"cursor":cursor}});
+            p["continuation_call"] = json!({"name":"backend.source","arguments":{"coordinate":"target","selected_symbol":{"kind":"selected-symbol-id","value":"1111111111111111111111111111111111111111111111111111111111111111"},"detail":"standard","byte_range":true,"cursor":cursor}});
         }
         p
     };
     for mutation in [
         "valid",
+        "canonical-addition",
         "mcp-only",
         "gap",
         "overlap",
@@ -1142,6 +1143,11 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
         "zero-progress",
         "missing-cursor",
         "wrong-continuation",
+        "wrong-coordinate",
+        "wrong-selected",
+        "wrong-detail",
+        "wrong-opt-in",
+        "selector-drift-later",
         "loop",
         "cli-mismatch",
         "cli-loop",
@@ -1176,6 +1182,25 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             }
             "wrong-continuation" => {
                 first["continuation_call"]["arguments"]["cursor"] = json!("foreign")
+            }
+            "wrong-coordinate" => {
+                first["continuation_call"]["arguments"]["coordinate"] = json!("foreign")
+            }
+            "wrong-selected" => {
+                first["continuation_call"]["arguments"]["selected_symbol"]["value"] =
+                    json!("2222222222222222222222222222222222222222222222222222222222222222")
+            }
+            "wrong-detail" => first["continuation_call"]["arguments"]["detail"] = json!("full"),
+            "wrong-opt-in" => first["continuation_call"]["arguments"]["byte_range"] = json!(false),
+            "selector-drift-later" => {
+                first["source"]["total"] = json!(16);
+                first["source"]["owner_end"] = json!(8208);
+                second["source"]["total"] = json!(16);
+                second["source"]["owner_end"] = json!(8208);
+                second["nextCursor"] = json!("mcp-final");
+                second["continuation_call"] = first["continuation_call"].clone();
+                second["continuation_call"]["arguments"]["cursor"] = json!("mcp-final");
+                second["continuation_call"]["arguments"]["detail"] = json!("full");
             }
             "loop" => {
                 first["source"]["total"] = json!(16);
@@ -1217,30 +1242,51 @@ fn source_range_pages_validate_utf8_frontiers_and_cli_parity() {
             fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut case = json!({"id":"source","language":"typescript","steps":[
-          {"id":"read","kind":"pages","page_format":"source-range","tool":"backend.source","arguments":{"coordinate":"target","byte_range":true},"cli":["source","target","--byte-range"],"minimum_pages":2,"bind":{"joined":"/text"},"expect":{"exit":0,"json":[{"pointer":"/text","equals":"é漢🦀\r\n"},{"pointer":"/bytes","equals":11},{"pointer":"/scope","equals":"native_primary_declaration"},{"pointer":"/source_policies","equals":[{"observed":0},{"observed":5}]}]}},
+          {"id":"read","kind":"pages","page_format":"source-range","tool":"backend.source","arguments":{"coordinate":"target","selected_symbol":{"kind":"selected-symbol-id","value":"1111111111111111111111111111111111111111111111111111111111111111"},"detail":"standard","byte_range":true},"cli":["source","target","--byte-range"],"minimum_pages":2,"bind":{"joined":"/text"},"expect":{"exit":0,"json":[{"pointer":"/text","equals":"é漢🦀\r\n"},{"pointer":"/bytes","equals":11},{"pointer":"/scope","equals":"native_primary_declaration"},{"pointer":"/source_policies","equals":[{"observed":0},{"observed":5}]}]}},
           {"id":"bound","kind":"process","binary":"probe","args":["-c","printf %s \"$1\"","_","${joined}"],"expect":{"exit":0,"stdout_contains":["é漢🦀\r\n"]}}
         ]});
         if mutation == "mcp-only" {
             case["steps"][0].as_object_mut().unwrap().remove("cli");
         }
+        if mutation == "canonical-addition" || mutation == "selector-drift-later" {
+            case["steps"][0]["arguments"]
+                .as_object_mut()
+                .unwrap()
+                .remove("detail");
+        }
         let output = world.invoke(&manifest(vec![case]), &[]);
         assert_eq!(
             output.status.code(),
-            Some(if mutation == "valid" || mutation == "mcp-only" {
-                0
-            } else {
-                1
-            }),
+            Some(
+                if mutation == "valid" || mutation == "canonical-addition" || mutation == "mcp-only"
+                {
+                    0
+                } else {
+                    1
+                }
+            ),
             "{mutation}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        if mutation == "valid" || mutation == "mcp-only" {
+        if mutation == "valid" || mutation == "canonical-addition" || mutation == "mcp-only" {
             let report = world.report();
             let detail = &report["cases"][0]["steps"][0]["detail"];
             assert_eq!(detail["page_receipts"].as_array().unwrap().len(), 2);
+            let aggregate: Value = serde_json::from_slice(
+                &fs::read(world.0.join("evidence/source/000-read.aggregate.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                aggregate["cli_pages"],
+                json!(if mutation == "mcp-only" { 0 } else { 2 })
+            );
+            if mutation != "mcp-only" {
+                assert_eq!(aggregate["cli_first"]["source"]["start"], 0);
+                assert_eq!(aggregate["cli_last"]["source"]["end"], 11);
+            }
             assert_eq!(
                 detail["cli_page_receipts"].as_array().unwrap().len(),
-                if mutation == "valid" { 2 } else { 0 }
+                if mutation == "mcp-only" { 0 } else { 2 }
             );
             assert_eq!(
                 detail["page_receipts"][0]["pid"],
