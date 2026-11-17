@@ -134,7 +134,7 @@ fn source_bound_related_edges_measure_the_observed_diamond_and_cycle() {
     let before: Value =
         serde_json::from_slice(&std::fs::read(tmp.path().join("before.json")).unwrap()).unwrap();
     let root = inputs["observations"][0]["coordinate"].as_str().unwrap();
-    let ids: Vec<_> = (0..4).map(|n| format!("symbol:{n:064x}")).collect();
+    let ids: Vec<_> = (1..=4).map(|n| format!("symbol:{n:064x}")).collect();
     let labels = [root, "b", "c", "d"];
     let edge = |from: usize, to: usize| serde_json::json!({"from_id":ids[from],"to_id":ids[to],"from":labels[from],"to":labels[to],"relation":"calls","confidence":"compiler"});
     // Each edge must be incident to its captured center; four pages exercise
@@ -273,6 +273,33 @@ fn typed_edges_reject_stale_source_and_wrong_seed_identity() {
     };
     let source_path = tmp.path().join("source.json");
     let mut source: Value = serde_json::from_slice(&std::fs::read(&source_path).unwrap()).unwrap();
+    let original = source["identity"]["semantic_data"]["value"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let legacy = original
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>();
+    source["identity"]["semantic_data"]["value"] = serde_json::json!(legacy);
+    std::fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
+    assert!(
+        invoke()["evidence"][0]["related_metrics"].is_object(),
+        "nonzero legacy bytes remain supported"
+    );
+    for invalid in [
+        serde_json::json!(original.to_ascii_uppercase()),
+        serde_json::json!("0".repeat(64)),
+        serde_json::json!(vec![0u8; 32]),
+    ] {
+        source["identity"]["semantic_data"]["value"] = invalid;
+        std::fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
+        assert!(
+            invoke()["evidence"][0]["related_metrics"].is_null(),
+            "invalid source ID must not establish related metrics"
+        );
+    }
     source["identity"]["semantic_data"]["value"] = "ab".repeat(32).into();
     std::fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
     assert!(invoke()["evidence"][0]["related_metrics"].is_null());
@@ -282,11 +309,7 @@ fn typed_edges_reject_stale_source_and_wrong_seed_identity() {
     after["source"] = "ab".repeat(32).into();
     std::fs::write(after_path, serde_json::to_vec(&after).unwrap()).unwrap();
     assert!(invoke()["evidence"][0]["related_metrics"].is_null());
-    std::fs::copy(
-        fixture.join("after.json"),
-        tmp.path().join("after.json"),
-    )
-    .unwrap();
+    std::fs::copy(fixture.join("after.json"), tmp.path().join("after.json")).unwrap();
     let related_path = tmp.path().join("related.json");
     let mut related: Value =
         serde_json::from_slice(&std::fs::read(&related_path).unwrap()).unwrap();
@@ -366,6 +389,18 @@ fn changed_endpoint_requires_explicit_matching_project_and_selected_id() {
         result["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
         1
     );
+    for invalid in [
+        serde_json::json!(id.to_ascii_uppercase()),
+        serde_json::json!("0".repeat(64)),
+        serde_json::json!(vec![0u8; 32]),
+    ] {
+        related["records"][0]["identity"]["semantic_data"]["value"] = invalid;
+        let result = invoke(&related);
+        assert_eq!(
+            result["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"], 0,
+            "invalid record ID must not attribute a changed endpoint"
+        );
+    }
     related["records"][0]["identity"]["semantic_data"]["value"] = "ff".repeat(32).into();
     let result = invoke(&related);
     assert_eq!(
