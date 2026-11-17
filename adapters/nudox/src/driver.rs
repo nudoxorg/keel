@@ -6,10 +6,12 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn hash(bytes: &[u8]) -> String {
@@ -68,6 +70,92 @@ fn authority_environment() -> BTreeMap<String, String> {
         }
     }
     env
+}
+// The credential is deliberately outside the serializable environment and reports.
+struct AccountKey {
+    value: String,
+    basename: String,
+}
+fn account_key() -> Result<Option<Arc<AccountKey>>, String> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use std::path::Component;
+    let Some(path) = std::env::var_os("KEEL_NUDOX_API_KEY_FILE") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let fail = || "invalid private account key file or parent permissions".to_owned();
+    if !path.is_absolute() {
+        return Err(fail());
+    }
+    let basename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(fail)?
+        .to_owned();
+    let mut dir = open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| fail())?;
+    let parent = path.parent().ok_or_else(fail)?;
+    for component in parent.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                dir = openat(
+                    &dir,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| fail())?;
+            }
+            _ => return Err(fail()),
+        }
+    }
+    let meta = fs::File::from(dir.try_clone().map_err(|_| fail())?)
+        .metadata()
+        .map_err(|_| fail())?;
+    let uid = rustix::process::geteuid().as_raw();
+    if meta.uid() != uid || meta.mode() & 0o7777 != 0o700 {
+        return Err(fail());
+    }
+    let fd = openat(
+        &dir,
+        path.file_name().ok_or_else(fail)?,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| fail())?;
+    let file = fs::File::from(fd);
+    let meta = file.metadata().map_err(|_| fail())?;
+    if !meta.is_file() || meta.uid() != uid || meta.mode() & 0o7777 != 0o600 {
+        return Err(fail());
+    }
+    let mut bytes = Vec::new();
+    file.take(4098)
+        .read_to_end(&mut bytes)
+        .map_err(|_| fail())?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.is_empty()
+        || bytes.len() > 4096
+        || bytes
+            .iter()
+            .any(|b| !b.is_ascii_alphanumeric() && !b"_.-".contains(b))
+    {
+        return Err(fail());
+    }
+    let value = String::from_utf8(bytes).map_err(|_| fail())?;
+    let basename = if basename.contains(&value) {
+        "***".to_owned()
+    } else {
+        basename
+    };
+    Ok(Some(Arc::new(AccountKey { value, basename })))
 }
 struct Options {
     manifest: PathBuf,
@@ -143,13 +231,20 @@ struct World {
     endpoint: PathBuf,
     bins: PathBuf,
     env: BTreeMap<String, String>,
+    account_key: Option<Arc<AccountKey>>,
     daemon: Option<process::Daemon>,
     generation: usize,
     bindings: BTreeMap<String, Value>,
     sessions: BTreeMap<String, NamedSession>,
 }
 impl World {
-    fn new(case: &Case, bins: &Path, root: &Path, serial: usize) -> Result<Self, String> {
+    fn new(
+        case: &Case,
+        bins: &Path,
+        root: &Path,
+        serial: usize,
+        account_key: Option<Arc<AccountKey>>,
+    ) -> Result<Self, String> {
         let project = root.join("project");
         fs::create_dir_all(&project).map_err(|e| e.to_string())?;
         fs::set_permissions(root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
@@ -216,6 +311,7 @@ impl World {
             endpoint,
             bins: bins.to_path_buf(),
             env,
+            account_key,
             daemon: None,
             generation: 0,
             bindings,
@@ -231,6 +327,16 @@ impl World {
             .envs(&self.env)
             .current_dir(&self.project);
         command
+    }
+    fn account_command(&self, binary: &str) -> Command {
+        let mut command = self.command(binary);
+        if let Some(key) = &self.account_key {
+            command.env("NUDOX_API_KEY", &key.value);
+        }
+        command
+    }
+    fn secret(&self) -> Option<&str> {
+        self.account_key.as_ref().map(|k| k.value.as_str())
     }
     fn expand(&self, value: &str) -> Result<String, String> {
         let mut out = value.to_owned();
@@ -371,6 +477,7 @@ impl World {
         let mut daemon = process::Daemon::spawn(
             &mut command,
             &self.root.join(format!("locald-{}.log", self.generation)),
+            self.secret(),
         )?;
         let end = Instant::now() + Duration::from_secs(90);
         loop {
@@ -395,7 +502,7 @@ impl World {
         deadline: Duration,
         prefix: &Path,
     ) -> Result<process::Output, String> {
-        let mut command = self.command("backend-cli");
+        let mut command = self.account_command("backend-cli");
         command
             .arg("--endpoint")
             .arg(&self.endpoint)
@@ -405,7 +512,7 @@ impl World {
         for arg in args {
             command.arg(self.expand(arg)?);
         }
-        process::run(&mut command, None, deadline, prefix)
+        process::run(&mut command, None, deadline, prefix, self.secret())
     }
     fn mcp_start(
         &mut self,
@@ -417,13 +524,13 @@ impl World {
             return Err("MCP session already live or session limit reached".into());
         }
         let deadline = Instant::now() + timeout;
-        let mut command = self.command("backend-mcp");
+        let mut command = self.account_command("backend-mcp");
         command
             .arg("--endpoint")
             .arg(&self.endpoint)
             .arg("--project")
             .arg(&self.project);
-        let process = process::Session::spawn(&mut command, prefix)?;
+        let process = process::Session::spawn(&mut command, prefix, self.secret())?;
         self.sessions.insert(
             step.session.clone(),
             NamedSession {
@@ -555,13 +662,13 @@ impl World {
     fn pages(&mut self, step: &Step, prefix: &Path) -> Result<Value, String> {
         let deadline = Instant::now() + Duration::from_secs(step.timeout_seconds);
         let remaining = || deadline.saturating_duration_since(Instant::now());
-        let mut command = self.command("backend-mcp");
+        let mut command = self.account_command("backend-mcp");
         command
             .arg("--endpoint")
             .arg(&self.endpoint)
             .arg("--project")
             .arg(&self.project);
-        let mut session = process::Session::spawn(&mut command, prefix)?;
+        let mut session = process::Session::spawn(&mut command, prefix, self.secret())?;
         let init = session.exchange(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"keel-paged-contract","version":"1"}}}), remaining())?;
         if init.get("result").is_none() {
             return Err(format!("paged MCP initialize refused: {init}"));
@@ -838,7 +945,7 @@ impl World {
                         .map(|s| self.expand(s).map(String::into_bytes))
                         .transpose()?
                 };
-                process::run(&mut command, input, time_left(), prefix)?
+                process::run(&mut command, input, time_left(), prefix, self.secret())?
             }
             _ => return Err("validated step kind became unknown".into()),
         };
@@ -919,7 +1026,7 @@ impl World {
                 .collect::<Vec<_>>()
                 .join("\n")
                 + "\n";
-            let mut command = self.command("backend-mcp");
+            let mut command = self.account_command("backend-mcp");
             command
                 .arg("--endpoint")
                 .arg(&self.endpoint)
@@ -930,6 +1037,7 @@ impl World {
                 Some(input.into_bytes()),
                 time_left(),
                 &prefix.with_extension("mcp"),
+                self.secret(),
             )?;
             if mcp.code != Some(0) {
                 return Err(format!(
@@ -1112,6 +1220,8 @@ fn run() -> Result<bool, String> {
         }
         return Ok(true);
     }
+    let account_key = account_key()?;
+    let account_key_source = account_key.as_ref().map(|k| k.basename.as_str());
     let bins = options
         .bins
         .canonicalize()
@@ -1160,7 +1270,7 @@ fn run() -> Result<bool, String> {
             .cloned()
             .collect::<Vec<_>>();
         let world = if blocked.is_empty() {
-            World::new(case, &bins, &root, serial)
+            World::new(case, &bins, &root, serial, account_key.clone())
         } else {
             Err(format!(
                 "required foundation failed or blocked: {}",
@@ -1227,7 +1337,7 @@ fn run() -> Result<bool, String> {
         reports.push(json!({"id":case.id,"node":case.node,"language":case.language,"status":status,"error":failed,"duration_ms":start.elapsed().as_millis(),"steps":steps,"world_isolation":world_isolation,"evidence_dir":root}));
         write_json(
             &evidence.join("report.json"),
-            &json!({"schema":1,"manifest_sha256":hash(&raw),"driver_sha256":driver_sha256,"authority_environment":authorities,"authority_environment_sha256":authority_hash,"inventory":inventory_cases,"containment_policy":{"root":std::env::var_os("KEEL_CGROUP_ROOT"),"required":std::env::var_os("KEEL_REQUIRE_CGROUP").as_deref()==Some(std::ffi::OsStr::new("1"))},"binaries":binary_hashes,"order":order,"status":if green{"pass"}else{"fail"},"cases":reports,"duration_ms":started.elapsed().as_millis()}),
+            &json!({"schema":1,"manifest_sha256":hash(&raw),"driver_sha256":driver_sha256,"authority_environment":authorities,"authority_environment_sha256":authority_hash,"account_key":{"present":account_key.is_some(),"source_basename":account_key_source},"inventory":inventory_cases,"containment_policy":{"root":std::env::var_os("KEEL_CGROUP_ROOT"),"required":std::env::var_os("KEEL_REQUIRE_CGROUP").as_deref()==Some(std::ffi::OsStr::new("1"))},"binaries":binary_hashes,"order":order,"status":if green{"pass"}else{"fail"},"cases":reports,"duration_ms":started.elapsed().as_millis()}),
         )?;
     }
     if file_hash(&driver_path)? != driver_sha256 {
@@ -1243,7 +1353,7 @@ fn run() -> Result<bool, String> {
         if file_hash(&bins.join(binary))? != *before {
             write_json(
                 &evidence.join("report.json"),
-                &json!({"schema":1,"manifest_sha256":hash(&raw),"driver_sha256":driver_sha256,"authority_environment":authorities,"authority_environment_sha256":authority_hash,"inventory":inventory_cases,"containment_policy":{"root":std::env::var_os("KEEL_CGROUP_ROOT"),"required":std::env::var_os("KEEL_REQUIRE_CGROUP").as_deref()==Some(std::ffi::OsStr::new("1"))},"binaries":binary_hashes,"order":order,"status":"fail","artifact_error":format!("artifact {binary} changed while cases were running"),"cases":reports,"duration_ms":started.elapsed().as_millis()}),
+                &json!({"schema":1,"manifest_sha256":hash(&raw),"driver_sha256":driver_sha256,"authority_environment":authorities,"authority_environment_sha256":authority_hash,"account_key":{"present":account_key.is_some(),"source_basename":account_key_source},"inventory":inventory_cases,"containment_policy":{"root":std::env::var_os("KEEL_CGROUP_ROOT"),"required":std::env::var_os("KEEL_REQUIRE_CGROUP").as_deref()==Some(std::ffi::OsStr::new("1"))},"binaries":binary_hashes,"order":order,"status":"fail","artifact_error":format!("artifact {binary} changed while cases were running"),"cases":reports,"duration_ms":started.elapsed().as_millis()}),
             )?;
             return Err(format!(
                 "artifact {binary} changed while cases were running"

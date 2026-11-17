@@ -43,12 +43,44 @@ struct Capture {
     error: Option<String>,
 }
 
-fn drain<R: Read + Send + 'static>(mut pipe: R, mut file: File) -> mpsc::Receiver<Capture> {
+fn redact(bytes: &[u8], secret: Option<&str>, truncated: bool) -> Vec<u8> {
+    let Some(secret) = secret else {
+        return bytes.to_vec();
+    };
+    let key = secret.as_bytes();
+    let mut output = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset..].starts_with(key) {
+            output.extend_from_slice(b"***");
+            offset += key.len();
+        } else {
+            output.push(bytes[offset]);
+            offset += 1;
+        }
+    }
+    // Do not persist a credential prefix cut off by our own capture limit.
+    // Full matches have already been replaced with a marker outside the key alphabet.
+    if truncated {
+        let max = output.len().min(key.len().saturating_sub(1));
+        if let Some(n) = (1..=max).rev().find(|&n| output.ends_with(&key[..n])) {
+            output.truncate(output.len() - n);
+        }
+    }
+    output
+}
+
+fn drain<R: Read + Send + 'static>(
+    mut pipe: R,
+    mut file: File,
+    secret: Option<String>,
+) -> mpsc::Receiver<Capture> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let mut buf = [0_u8; 16 * 1024];
         let mut error = None;
+        let mut truncated = false;
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) => break,
@@ -56,11 +88,9 @@ fn drain<R: Read + Send + 'static>(mut pipe: R, mut file: File) -> mpsc::Receive
                     let keep = n.min(STREAM_LIMIT.saturating_sub(bytes.len()));
                     if keep > 0 {
                         bytes.extend_from_slice(&buf[..keep]);
-                        if let Err(e) = file.write_all(&buf[..keep]) {
-                            error.get_or_insert_with(|| format!("write capture: {e}"));
-                        }
                     }
                     if keep < n {
+                        truncated = true;
                         error
                             .get_or_insert_with(|| format!("output exceeded {STREAM_LIMIT} bytes"));
                     }
@@ -71,6 +101,10 @@ fn drain<R: Read + Send + 'static>(mut pipe: R, mut file: File) -> mpsc::Receive
                     break;
                 }
             }
+        }
+        let bytes = redact(&bytes, secret.as_deref(), truncated);
+        if let Err(e) = file.write_all(&bytes) {
+            error.get_or_insert_with(|| format!("write capture: {e}"));
         }
         if let Err(e) = file.flush() {
             error.get_or_insert_with(|| format!("flush capture: {e}"));
@@ -97,6 +131,7 @@ pub(crate) fn run(
     input: Option<Vec<u8>>,
     deadline: Duration,
     prefix: &Path,
+    secret: Option<&str>,
 ) -> Result<Output, String> {
     let mut stdout_name = prefix.as_os_str().to_os_string();
     stdout_name.push(".stdout");
@@ -126,8 +161,16 @@ pub(crate) fn run(
         message
     })?;
     let id = child.id();
-    let stdout = drain(child.stdout.take().expect("piped stdout"), stdout_file);
-    let stderr = drain(child.stderr.take().expect("piped stderr"), stderr_file);
+    let stdout = drain(
+        child.stdout.take().expect("piped stdout"),
+        stdout_file,
+        secret.map(str::to_owned),
+    );
+    let stderr = drain(
+        child.stderr.take().expect("piped stderr"),
+        stderr_file,
+        secret.map(str::to_owned),
+    );
     if let Some(data) = input {
         let mut stdin = child.stdin.take().expect("piped stdin");
         thread::spawn(move || {
@@ -199,10 +242,15 @@ pub(crate) struct Daemon {
     id: u32,
     scope: crate::isolation::Scope,
     isolation: serde_json::Value,
+    captures: Vec<mpsc::Receiver<Capture>>,
 }
 
 impl Daemon {
-    pub(crate) fn spawn(command: &mut Command, log: &Path) -> Result<Self, String> {
+    pub(crate) fn spawn(
+        command: &mut Command,
+        log: &Path,
+        secret: Option<&str>,
+    ) -> Result<Self, String> {
         let scope = crate::isolation::Scope::new()?;
         let isolation = serde_json::json!({"mode":scope.mode(),"path":scope.path()});
         let mut scoped_command = scope.command(command)?;
@@ -214,19 +262,33 @@ impl Daemon {
         command
             .process_group(0)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(file))
-            .stderr(Stdio::from(stderr));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let child = command.spawn().map_err(|e| {
             let message = format!("spawn daemon: {e}");
             record_error(log, &message);
             message
         })?;
+        let mut child = child;
         let id = child.id();
+        let captures = vec![
+            drain(
+                child.stdout.take().expect("piped stdout"),
+                file,
+                secret.map(str::to_owned),
+            ),
+            drain(
+                child.stderr.take().expect("piped stderr"),
+                stderr,
+                secret.map(str::to_owned),
+            ),
+        ];
         Ok(Self {
             child: Some(child),
             id,
             scope,
             isolation,
+            captures,
         })
     }
 
@@ -254,7 +316,16 @@ impl Daemon {
             // The group may have already vanished, e.g. after a normal exit.
             let _ = group_result;
         }
-        self.scope.stop()
+        self.scope.stop()?;
+        for capture in self.captures.drain(..) {
+            let capture = capture
+                .recv_timeout(DRAIN_GRACE)
+                .map_err(|_| "daemon output drain did not finish".to_owned())?;
+            if let Some(error) = capture.error {
+                return Err(format!("daemon output: {error}"));
+            }
+        }
+        Ok(())
     }
     pub(crate) fn isolation(&self) -> &serde_json::Value {
         &self.isolation
@@ -281,7 +352,11 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn spawn(command: &mut Command, prefix: &Path) -> Result<Self, String> {
+    pub(crate) fn spawn(
+        command: &mut Command,
+        prefix: &Path,
+        secret: Option<&str>,
+    ) -> Result<Self, String> {
         use std::io::BufRead;
         let scope = crate::isolation::Scope::new()?;
         let isolation = serde_json::json!({"mode":scope.mode(),"path":scope.path()});
@@ -322,6 +397,7 @@ impl Session {
         });
         let stdout = child.stdout.take().expect("piped stdout");
         let (response_tx, responses) = mpsc::sync_channel(32);
+        let stdout_secret = secret.map(str::to_owned);
         thread::spawn(move || {
             let mut reader = std::io::BufReader::new(stdout);
             let mut total = 0usize;
@@ -342,7 +418,8 @@ impl Session {
                     break;
                 }
                 let kept = n.min(remaining);
-                if let Err(e) = stdout_file.write_all(&line[..kept]) {
+                let safe_line = redact(&line[..kept], stdout_secret.as_deref(), n > remaining);
+                if let Err(e) = stdout_file.write_all(&safe_line) {
                     let _ = response_tx.send(Err(format!("write session stdout: {e}")));
                     break;
                 }
@@ -357,8 +434,8 @@ impl Session {
                         .send(Err("session stdout ended with an incomplete line".into()));
                     break;
                 }
-                let parsed =
-                    serde_json::from_slice(&line).map_err(|e| format!("invalid session JSON: {e}"));
+                let parsed = serde_json::from_slice(&safe_line)
+                    .map_err(|e| format!("invalid session JSON: {e}"));
                 let invalid = parsed.is_err();
                 if response_tx.send(parsed).is_err() || invalid {
                     break;
@@ -366,7 +443,11 @@ impl Session {
             }
             let _ = stdout_file.flush();
         });
-        let stderr = drain(child.stderr.take().expect("piped stderr"), stderr_file);
+        let stderr = drain(
+            child.stderr.take().expect("piped stderr"),
+            stderr_file,
+            secret.map(str::to_owned),
+        );
         Ok(Self {
             child: Some(child),
             id,
