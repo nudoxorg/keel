@@ -60,8 +60,10 @@ on that captured relation set. SCC count and maximum reverse shortest depth
 describe the **observed subgraph only**: adding edges can change either in both
 directions. The adapter orders cases with observed forward paths to changed
 declarations first. The source seed is attributed by its source response; other
-endpoints count as changed only when their own records explicitly carry the same
-project, selected ID, coordinate and changed path. Missing project attribution is
+endpoints count as changed only when their records match a same-page owner-issued
+attribution in project, selected ID, coordinate, path, view, semantic revision,
+and source/workspace scope. The adapter checks visible consistency only; it
+cannot verify the owner's seal or source membership offline. Missing project attribution is
 reported as `unattributed_related_nodes`, never inferred from opaque coordinate
 text. This is a scheduling hint; an absent path proves nothing,
 case-to-coordinate bindings remain caller supplied, and global complexity,

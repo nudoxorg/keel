@@ -33,6 +33,9 @@ fn id(s: &str) -> bool {
 fn hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit())
 }
+fn witness_hash(v: &Value) -> bool {
+    v.as_str().is_some_and(crate::guidance::valid_selected_id)
+}
 
 pub fn metrics(
     pages: &[Value],
@@ -121,7 +124,14 @@ pub fn metrics(
             }
         }
         if let Some(records) = page["records"].as_array() {
-            rows.extend(records.iter().cloned());
+            rows.extend(records.iter().cloned().map(|row| {
+                (
+                    row,
+                    page["related_project_scope"].clone(),
+                    page["related_project_attributions"].clone(),
+                    b["semantic_revision"].clone(),
+                )
+            }));
         }
         for edge in page["edges"]
             .as_array()
@@ -242,11 +252,11 @@ pub fn metrics(
         }
     }
     // The seed has an independently returned source identity and project.
-    // Other endpoints count only when a related record explicitly attributes
-    // the same selected ID and coordinate to this project and a changed path.
+    // Other endpoints require a matching owner-issued statement on the same page.
+    // This checks visible consistency, not the owner's seal or source membership.
     // Opaque coordinate text is never parsed to infer project ownership.
     let mut attributed = BTreeMap::from([(root.clone(), source_path.to_owned())]);
-    for row in rows {
+    for (row, scope, claims, semantic_revision) in rows {
         if row.pointer("/identity/project").and_then(Value::as_str) != Some(project) {
             continue;
         }
@@ -260,6 +270,37 @@ pub fn metrics(
         let Some(path) = row.pointer("/identity/path").and_then(Value::as_str) else {
             continue;
         };
+        let Some(claims) = claims.as_array() else {
+            continue;
+        };
+        let matching: Vec<_> = claims
+            .iter()
+            .filter(|claim| claim["row_id"] == id)
+            .collect();
+        if matching.len() != 1 {
+            continue;
+        }
+        let claim = matching[0];
+        if claim["project"] != project
+            || claim["path"] != path
+            || claim["view_root"] != source_view
+            || claim["semantic_revision"] != semantic_revision
+            || claim["source_relation_root"] != scope["source_relation_root"]
+            || claim["workspace_root"] != scope["workspace_root"]
+            || ![
+                "project_key",
+                "source_fact",
+                "image_digest",
+                "seal",
+                "source_relation_root",
+                "workspace_root",
+            ]
+            .iter()
+            .all(|field| witness_hash(&claim[*field]))
+            || claim["entity_index"].as_u64().is_none()
+        {
+            continue;
+        }
         if labels.get(&id).is_some_and(|label| label == coordinate)
             && crate::guidance::normal_path(path)
         {

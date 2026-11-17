@@ -184,6 +184,73 @@ fn source_bound_related_edges_measure_the_observed_diamond_and_cycle() {
     assert_eq!(m["max_reverse_shortest_depth"], 2);
     let path = tmp.path().join("related0.json");
     let mut page: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Protocol control: a nonseed endpoint requires a matching visible owner
+    // statement. These fields are synthetic; this does not verify an owner MAC.
+    page["records"] = serde_json::json!([{ "identity": {
+        "project":"/workspace/example", "path":"src/lib.rs", "coordinate":"b",
+        "semantic_data":{"kind":"selected-symbol-id", "value":ids[1].strip_prefix("symbol:").unwrap()}
+    }}]);
+    page["related_project_scope"] = serde_json::json!({"source_relation_root":"66".repeat(32), "workspace_root":"77".repeat(32)});
+    page["related_project_attributions"] = serde_json::json!([{
+        "row_id":ids[1], "project":"/workspace/example", "path":"src/lib.rs",
+        "view_root":before["revision"], "semantic_revision":"44".repeat(32),
+        "source_relation_root":"66".repeat(32), "workspace_root":"77".repeat(32),
+        "project_key":"88".repeat(32), "source_fact":"99".repeat(32),
+        "image_digest":"aa".repeat(32), "seal":"bb".repeat(32), "entity_index":0
+    }]);
+    std::fs::write(&path, serde_json::to_vec(&page).unwrap()).unwrap();
+    let v: Value = serde_json::from_slice(&run().stdout).unwrap();
+    assert_eq!(
+        v["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        2
+    );
+    for field in [
+        "row_id",
+        "project",
+        "path",
+        "view_root",
+        "semantic_revision",
+        "source_relation_root",
+        "workspace_root",
+        "project_key",
+        "source_fact",
+        "image_digest",
+        "seal",
+        "entity_index",
+    ] {
+        let mut invalid = page.clone();
+        invalid["related_project_attributions"][0][field] = Value::Null;
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let v: Value = serde_json::from_slice(&run().stdout).unwrap();
+        assert_eq!(
+            v["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"], 1,
+            "{field}"
+        );
+        assert_eq!(
+            v["evidence"][0]["related_metrics"]["observed_call_edges"], 5,
+            "{field}"
+        );
+    }
+    let mut naked = page.clone();
+    naked["related_project_attributions"] = Value::Null;
+    std::fs::write(&path, serde_json::to_vec(&naked).unwrap()).unwrap();
+    let v: Value = serde_json::from_slice(&run().stdout).unwrap();
+    assert_eq!(
+        v["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        1
+    );
+    let mut duplicate = page.clone();
+    let claim = duplicate["related_project_attributions"][0].clone();
+    duplicate["related_project_attributions"]
+        .as_array_mut()
+        .unwrap()
+        .push(claim);
+    std::fs::write(&path, serde_json::to_vec(&duplicate).unwrap()).unwrap();
+    let v: Value = serde_json::from_slice(&run().stdout).unwrap();
+    assert_eq!(
+        v["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        1
+    );
     page["related_basis"]["source_view_root"] = "66".repeat(32).into();
     std::fs::write(&path, serde_json::to_vec(&page).unwrap()).unwrap();
     let v: Value = serde_json::from_slice(&run().stdout).unwrap();
@@ -379,6 +446,20 @@ fn changed_endpoint_requires_explicit_matching_project_and_selected_id() {
         0
     );
     related["records"][0]["identity"]["project"] = "/workspace/example".into();
+    let result = invoke(&related);
+    assert_eq!(
+        result["evidence"][0]["related_metrics"]["observed_reachable_changed_nodes"],
+        0
+    );
+    related["related_project_scope"] = serde_json::json!({"source_relation_root":"66".repeat(32), "workspace_root":"77".repeat(32)});
+    related["related_project_attributions"] = serde_json::json!([{
+        "row_id": edge["from_id"], "project":"/workspace/example", "path":"other.rs",
+        "view_root": related["related_basis"]["source_view_root"],
+        "semantic_revision": related["related_basis"]["semantic_revision"],
+        "source_relation_root":"66".repeat(32), "workspace_root":"77".repeat(32),
+        "project_key":"88".repeat(32), "source_fact":"99".repeat(32),
+        "image_digest":"aa".repeat(32), "seal":"bb".repeat(32), "entity_index":0
+    }]);
     let result = invoke(&related);
     assert_eq!(result["cases"], serde_json::json!(["fanout", "unobserved"]));
     assert_eq!(
